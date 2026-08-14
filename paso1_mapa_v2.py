@@ -10,6 +10,7 @@ los puntos de un equipo en un instante dado.
 
 import math, random
 
+VELOCIDAD_TROPAS = 2.2
 
 
 class Edificio:
@@ -226,6 +227,41 @@ class Escuadron:
         """
         return self.poder_por_soldado *  self.soldados_actuales
 
+    def avanzar_un_tick(self):
+        """
+        Mueve el escuadrón un paso hacia su destino, si tiene uno.
+        """
+        if self.destino is None:
+            return  # no hay a dónde ir, no hace nada
+        
+        pos_actual = (self.x, self.y)
+        pos_destino = (self.destino.x, self.destino.y)
+
+        dist_restante = distancia(pos_actual, pos_destino)
+
+        if dist_restante <= VELOCIDAD_TROPAS:
+            # TODO: ya llegó (o va a llegar este tick) -> "snapea" a la
+            # posición exacta del destino, en vez de calcular una dirección
+            # self.x = ..., self.y = ...
+            # y aquí deberías cambiar self.estado también, piensa a qué valor
+            self.x = self.destino.x
+            self.y = self.destino.y
+            self.estado = "llego_a_destino"
+        else:
+            # TODO: todavía no llega -> calcula la dirección y avanza
+            # direccion_x = (pos_destino[0] - pos_actual[0]) / dist_restante
+            # direccion_y = ...
+            # self.x = self.x + velocidad * direccion_x
+            # self.y = ...
+            direccion_x = (pos_destino[0] - pos_actual[0]) / dist_restante
+            direccion_y = (pos_destino[1] - pos_actual[1]) / dist_restante
+            self.x = self.x + VELOCIDAD_TROPAS * direccion_x
+            self.y = self.y + VELOCIDAD_TROPAS * direccion_y
+
+    def enviar_a_atacar(self, edificio_objetivo):
+        self.destino = edificio_objetivo
+        self.estado = "viajando_ataque"
+
 
 class Jugador:
     def __init__(self, nombre, equipo, x, y):
@@ -233,22 +269,37 @@ class Jugador:
         self.equipo = equipo
         self.x = x
         self.y = y
-        self.hits = 4
+        self.vidas = 4
         self.puntos_personales = 0
+        self.destino = None
 
-        # Estos 4 ya los sabes hacer, del código anterior:
-        # TODO: total_soldados_reserva (random 18462-26000)
-        # TODO: tier (T7/T8/T9 según cortes de 3500)
-        # TODO: poder_por_soldado (según tier)
+        # TODO 1: genera total_soldados con random.randint(18462, 26000)
+        total_soldados = random.randint(18462, 29000)
+        self.total_soldados = total_soldados
+        # TODO 2: determina el tier ("T7"/"T8"/"T9") usando los cortes de 3500
+        if total_soldados < 21962:
+            self.tier = "T7"
+            poder_por_soldado = 915
+        elif total_soldados < 25462:
+            self.tier = "T8"
+            poder_por_soldado = 1100
+        else: 
+            self.tier = "T9"
+            poder_por_soldado = 1350
+        self.poder_por_soldado = poder_por_soldado
+        # TODO 3: define poder_por_soldado según el tier (915/1100/1350)
+        # TODO 4: calcula poder_total = total_soldados * poder_por_soldado
+        self.poder_total = total_soldados * poder_por_soldado
+        # TODO 5: calcula los 3 escuadrones (cantidad de soldados en cada uno)
+        #         usando random.uniform con los rangos de variación que definimos
+        capacidad_1 = round(total_soldados * random.uniform(0.104, 0.164))
+        self.escuadron_1 = Escuadron(jugador_dueño=self, capacidad_maxima=capacidad_1, poder_por_soldado=poder_por_soldado)   
+        capacidad_2 = round(total_soldados * random.uniform(0.065, 0.125))  # 9.5% ± 3%
+        self.escuadron_2 = Escuadron(jugador_dueño=self, capacidad_maxima=capacidad_2, poder_por_soldado=poder_por_soldado)   
+        capacidad_3 = round(total_soldados * random.uniform(0.050, 0.110))  # 8.0% ± 3%     
+        self.escuadron_3 = Escuadron(jugador_dueño=self, capacidad_maxima=capacidad_3, poder_por_soldado=poder_por_soldado)   
 
-        # TODO: calcula las 3 capacidades máximas de escuadrón
-        # (mismo cálculo de %+variación que ya hiciste, pero ahora
-        # el resultado es la "capacidad_maxima", no un número final)
-
-        # TODO: crea los 3 objetos Escuadron, uno por cada capacidad,
-        # pasándoles self (este mismo jugador) y poder_por_soldado.
-        # Guárdalos como self.escuadron_1, self.escuadron_2, self.escuadron_3
-        
+        # TODO 6: guarda todo como atributos self.xxx para usar después
 
 if __name__ == "__main__":
 
@@ -262,15 +313,17 @@ if __name__ == "__main__":
     #   base = 80 (castillo) + 10 (observatorio) = 90
     #   con +10% del observatorio = 90 * 1.10 = 99
     # Si tu función no da 99, hay un error en tu lógica.
-    jugador_prueba = Jugador(nombre="Doctor1", equipo="equipo_A", x=500, y=0)
 
-    print("Total soldados:", jugador_prueba.total_soldados)
-    print("Tier:", jugador_prueba.tier)
-    print("Poder por soldado:", jugador_prueba.poder_por_soldado)
-    print("Poder total:", jugador_prueba.poder_total)
-    print("Escuadrón 1 (soldados):", jugador_prueba.escuadron_1)
-    print("Escuadrón 2 (soldados):", jugador_prueba.escuadron_2)
-    print("Escuadrón 3 (soldados):", jugador_prueba.escuadron_3)
-    print("Poder escuadrón 1:", jugador_prueba.poder_escuadron_1)
-    print("Vidas:", jugador_prueba.vidas)
-    print("Destino:", jugador_prueba.destino)
+
+    jugador_prueba = Jugador(nombre="Doctor1", equipo="equipo_A", x=0, y=0)
+    castillo = Edificio(nombre="castillo", x=100, y=0, tasa_alianza=80, tasa_personal=30, minuto_aparicion=10)
+
+    escuadron = jugador_prueba.escuadron_1
+    escuadron.destino = castillo
+
+    # Simula varios ticks seguidos
+    for i in range(50):
+        escuadron.avanzar_un_tick()
+        print(f"Tick {i}: x={escuadron.x:.2f}, y={escuadron.y:.2f}, estado={escuadron.estado}")
+        if escuadron.estado == "llego_a_destino":
+            break
