@@ -220,6 +220,10 @@ class Jugador:
         self.destino = None
         self.cooldown_teletransporte_restante = 0
 
+        # Genoma: [w1, w2, w3, w4] -- se puede pasar uno ya evolucionado,
+        # o si no se pasa ninguno, arranca con valores aleatorios (gen. 0)
+        self.genoma = [random.uniform(-1, 1) for _ in range(4)]
+
         total_soldados = random.randint(18462, 26000)
         self.total_soldados_reserva = total_soldados  # baja cuando muere gente
         self.total_soldados_original = total_soldados  # referencia fija, no cambia
@@ -415,23 +419,123 @@ def procesar_llegadas(todos_los_jugadores, mapa):
 
 
 # ============================================================
-# AGENTE TONTO -- TODO: PENDIENTE, LO ARMAMOS JUNTOS DESPUÉS
+# AGENTE EVOLUTIVO (basado en genoma)
 # ============================================================
 
-def contar_escuadrones_asignados(edificio, equipo, todos_los_jugadores):
+def decidir_accion_genoma(jugador, mapa, todos_los_jugadores):
+    """
+    Reemplazo del agente tonto: cada escuadrón "en_base" evalúa TODAS
+    las opciones disponibles (edificios libres + jugadores enemigos)
+    usando el genoma del jugador, y elige la de mayor puntaje.
+    """
+    for escuadron in jugador.escuadrones():
+        if escuadron.estado != "en_base":
+            continue
+
+        mejor_opcion = None
+        mejor_score = None
+        mejor_tipo = None  # "edificio" o "jugador"
+
+        for edificio in mapa:
+            if edificio.dueño is None:
+                asignados = contar_escuadrones_asignados(edificio, jugador.equipo, todos_los_jugadores)
+                if asignados >= MAX_ESCUADRONES_POR_EDIFICIO:
+                    continue
+                score = puntaje_edificio(escuadron, jugador, edificio, todos_los_jugadores)
+                if mejor_score is None or score > mejor_score:
+                    mejor_score = score
+                    mejor_opcion = edificio
+                    mejor_tipo = "edificio"
+
+        for enemigo in todos_los_jugadores:
+            if enemigo.equipo == jugador.equipo:
+                continue
+            asignados = contar_escuadrones_asignados(enemigo, jugador.equipo, todos_los_jugadores)
+            if asignados >= MAX_ESCUADRONES_POR_EDIFICIO:
+                continue
+            score = puntaje_jugador_enemigo(escuadron, jugador, enemigo, todos_los_jugadores)
+            if mejor_score is None or score > mejor_score:
+                mejor_score = score
+                mejor_opcion = enemigo
+                mejor_tipo = "jugador"
+
+        if mejor_opcion is not None:
+            if mejor_tipo == "edificio":
+                escuadron.enviar_a_atacar(mejor_opcion)
+            else:
+                escuadron.enviar_a_atacar_jugador(mejor_opcion)
+
+
+# ============================================================
+# AGENTE TONTO -- se deja como referencia / comparación
+# ============================================================
+
+def contar_escuadrones_asignados(destino_objetivo, equipo, todos_los_jugadores):
     """
     Cuenta cuántos escuadrones de un equipo ya están yendo hacia o
-    defendiendo este edificio (sirve tanto para el límite de defensa
-    como para el límite de ataque conjunto).
+    defendiendo/atacando este destino (edificio o jugador enemigo).
+    Sirve para el límite de defensa, el límite de ataque conjunto,
+    y para el término w4 del genoma (coordinación).
     """
     contador = 0
     for j in todos_los_jugadores:
         if j.equipo != equipo:
             continue
         for esc in j.escuadrones():
-            if esc.destino is edificio and esc.estado in ("viajando_ataque", "defendiendo"):
+            if esc.destino is destino_objetivo and esc.estado in (
+                "viajando_ataque", "defendiendo", "viajando_ataque_jugador"
+            ):
                 contador += 1
     return contador
+
+
+def puntaje_edificio(escuadron, jugador, edificio, todos_los_jugadores):
+    """Qué tan atractivo le parece a este genoma ir a este edificio."""
+    w1, w2, w3, w4 = jugador.genoma
+
+    valor_puntos = edificio.tasa_alianza
+    try:
+        cercania = 15 / distancia((escuadron.x, escuadron.y), (edificio.x, edificio.y))
+    except ZeroDivisionError:
+        cercania = 15
+
+    aliados_ya_asignados = contar_escuadrones_asignados(edificio, jugador.equipo, todos_los_jugadores)
+
+    score = w1 * valor_puntos + w2 * cercania + w4 * aliados_ya_asignados
+    return score
+
+
+def poder_maximo_disponible(jugador_enemigo):
+    """
+    Retorna el poder del escuadrón más fuerte que tiene el jugador
+    enemigo disponible AHORA MISMO en su base (listo para defenderse).
+    Si no tiene ninguno en base, retorna 0 (está totalmente expuesto).
+    """
+    mejor_poder = 0
+    for esc in jugador_enemigo.escuadrones():
+        if esc.estado == "en_base":
+            if esc.poder_actual() > mejor_poder:
+                mejor_poder = esc.poder_actual()
+    return mejor_poder
+
+
+def puntaje_jugador_enemigo(escuadron, jugador, enemigo, todos_los_jugadores):
+    """Qué tan atractivo le parece a este genoma atacar a este jugador enemigo."""
+    w1, w2, w3, w4 = jugador.genoma
+
+    valor_puntos = 0  # atacar un jugador no da puntos de edificio directos
+    try:
+        cercania = 15 / distancia((escuadron.x, escuadron.y), (enemigo.x, enemigo.y))
+    except ZeroDivisionError:
+        cercania = 15
+
+    poder_defensa_enemiga = poder_maximo_disponible(enemigo)
+    poder_relativo = (escuadron.poder_actual() - poder_defensa_enemiga) / 1_000_000
+
+    aliados_ya_asignados = contar_escuadrones_asignados(enemigo, jugador.equipo, todos_los_jugadores)
+
+    score = w1 * valor_puntos + w2 * cercania + w3 * poder_relativo + w4 * aliados_ya_asignados
+    return score
 
 
 def decidir_accion_agente_tonto(jugador, mapa, todos_los_jugadores):
