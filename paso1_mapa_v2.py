@@ -29,6 +29,8 @@ RADIO_DETECCION_COMBATE = 5  # distancia máxima para considerar "cerca"
                               # (ajustable -- si el mapa se siente muy
                               # disperso o muy apretado, cambia este número)
 
+MAX_ESCUADRONES_POR_EDIFICIO = 6  # límite de defensores Y de ataque conjunto
+
 
 # ============================================================
 # PASO 1: MAPA (ya construido, se deja tal cual)
@@ -416,7 +418,28 @@ def procesar_llegadas(todos_los_jugadores, mapa):
 # AGENTE TONTO -- TODO: PENDIENTE, LO ARMAMOS JUNTOS DESPUÉS
 # ============================================================
 
+def contar_escuadrones_asignados(edificio, equipo, todos_los_jugadores):
+    """
+    Cuenta cuántos escuadrones de un equipo ya están yendo hacia o
+    defendiendo este edificio (sirve tanto para el límite de defensa
+    como para el límite de ataque conjunto).
+    """
+    contador = 0
+    for j in todos_los_jugadores:
+        if j.equipo != equipo:
+            continue
+        for esc in j.escuadrones():
+            if esc.destino is edificio and esc.estado in ("viajando_ataque", "defendiendo"):
+                contador += 1
+    return contador
+
+
 def decidir_accion_agente_tonto(jugador, mapa, todos_los_jugadores):
+    """
+    Regla fija: cada escuadrón "en_base" va al edificio libre más cercano
+    que no haya alcanzado el límite de escuadrones asignados; si no hay
+    ninguno libre disponible, va al jugador enemigo más cercano.
+    """
     for escuadron in jugador.escuadrones():
         if escuadron.estado != "en_base":
             continue
@@ -424,23 +447,26 @@ def decidir_accion_agente_tonto(jugador, mapa, todos_los_jugadores):
         mejor_libre = None
         menor_distancia_libre = None
         for edificio in mapa:
-            if edificio.dueño == None:
-                if menor_distancia_libre == None or distancia([escuadron.x, escuadron.y], [edificio.x, edificio.y]) < menor_distancia_libre:
-                    menor_distancia_libre = distancia([escuadron.x, escuadron.y], [edificio.x, edificio.y])
+            if edificio.dueño is None:
+                ya_asignados = contar_escuadrones_asignados(edificio, jugador.equipo, todos_los_jugadores)
+                if ya_asignados >= MAX_ESCUADRONES_POR_EDIFICIO:
+                    continue
+                d = distancia((escuadron.x, escuadron.y), (edificio.x, edificio.y))
+                if menor_distancia_libre is None or d < menor_distancia_libre:
+                    menor_distancia_libre = d
                     mejor_libre = edificio
-                    print(mejor_libre)   
         if mejor_libre is not None:
             escuadron.enviar_a_atacar(mejor_libre)
-            continue  # ya decidido, pasa al siguiente escuadrón
+            continue
 
         mejor_enemigo = None
         menor_distancia_enemigo = None
         for k in todos_los_jugadores:
             if k.equipo != jugador.equipo:
-                if menor_distancia_enemigo == None or distancia([escuadron.x, escuadron.y], [k.x, k.y]) < menor_distancia_enemigo:
-                    menor_distancia_enemigo = distancia([escuadron.x, escuadron.y], [k.x, k.y])
+                d = distancia((escuadron.x, escuadron.y), (k.x, k.y))
+                if menor_distancia_enemigo is None or d < menor_distancia_enemigo:
+                    menor_distancia_enemigo = d
                     mejor_enemigo = k
-                    print(mejor_enemigo)
         if mejor_enemigo is not None:
             escuadron.enviar_a_atacar_jugador(mejor_enemigo)
 
