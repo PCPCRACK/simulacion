@@ -20,7 +20,9 @@ import random
 VELOCIDAD_TROPAS = 2.2          # unidades de distancia por segundo
 COOLDOWN_TELETRANSPORTE = 120   # segundos
 K_COMBATE = 1.5                 # constante de la fórmula logística
+ESCALA_PUNTOS_KILL = 10_000      # divisor del poder eliminado -> puntos personales
 DURACION_PARTIDA_SEGUNDOS = 1800  # 30 minutos
+BONO_VICTORIA = 1_000_000         # domina sobre los puntos_personales típicos
 
 SPAWN_EQUIPO_A = (500, 0)
 SPAWN_EQUIPO_B = (500, 1000)
@@ -365,6 +367,15 @@ def resolver_llegada_a_edificio(escuadron_atacante, edificio, todos_los_jugadore
 
     poder_restante = abs(poder_a - poder_b)
 
+    # Ambos bandos destruyen la misma cantidad de poder enemigo en esta
+    # pelea (el poder inicial del que pierde, completo), así que ambos
+    # ganan los mismos puntos personales por "matar", sin importar quién
+    # se queda con el edificio al final.
+    poder_eliminado = min(poder_a, poder_b)
+    puntos_por_kill = poder_eliminado / ESCALA_PUNTOS_KILL
+    escuadron_atacante.jugador_dueño.puntos_personales += puntos_por_kill
+    defensor.jugador_dueño.puntos_personales += puntos_por_kill
+
     if ganador == "A":
         # Gana el atacante
         defensor.soldados_actuales = 0
@@ -402,6 +413,21 @@ def resolver_llegada_a_jugador(escuadron_atacante, jugador_destino):
         # Es un jugador enemigo -> Sistema 2, ataque directo
         jugador_destino.recibir_ataque_directo()
         escuadron_atacante.regresar_a_base()
+
+
+def sumar_puntos_personales(mapa_activo, todos_los_jugadores):
+    """
+    Se llama una vez por tick. Cada jugador con un escuadrón defendiendo
+    un edificio gana la tasa_personal completa de ese edificio (no se
+    divide entre varios defensores).
+    """
+    for edificio in mapa_activo:
+        if edificio.dueño is None:
+            continue
+        for jugador in todos_los_jugadores:
+            for escuadron in jugador.escuadrones():
+                if escuadron.estado == "defendiendo" and escuadron.destino is edificio:
+                    jugador.puntos_personales += edificio.tasa_personal
 
 
 def procesar_llegadas(todos_los_jugadores, mapa):
@@ -590,6 +616,18 @@ def crear_jugadores(cantidad_por_equipo):
     return jugadores
 
 
+def calcular_fitness(jugador, equipo_ganador):
+    """
+    Fitness individual: domina el resultado del equipo (bono grande si
+    tu equipo tuvo más puntos totales), y los puntos personales sirven
+    de desempate/ajuste fino dentro del mismo equipo.
+    """
+    fitness = jugador.puntos_personales
+    if jugador.equipo == equipo_ganador:
+        fitness += BONO_VICTORIA
+    return fitness
+
+
 def simular_partida(cantidad_por_equipo=5, duracion_segundos=DURACION_PARTIDA_SEGUNDOS, verbose=False):
     mapa = crear_mapa()
     jugadores = crear_jugadores(cantidad_por_equipo)
@@ -621,6 +659,7 @@ def simular_partida(cantidad_por_equipo=5, duracion_segundos=DURACION_PARTIDA_SE
         mapa_activo = [e for e in mapa if e.minuto_aparicion <= minuto_actual]
         puntos_equipo_A += calcular_puntos_equipo_por_segundo(mapa_activo, "equipo_A")
         puntos_equipo_B += calcular_puntos_equipo_por_segundo(mapa_activo, "equipo_B")
+        sumar_puntos_personales(mapa_activo, jugadores)
 
         if verbose and tick % 300 == 0:
             print(f"Tick {tick} (min {minuto_actual}): A={puntos_equipo_A:.0f}  B={puntos_equipo_B:.0f}")
