@@ -12,6 +12,7 @@ resto del proyecto.
 
 import math
 import random
+from paso3_motor_simulacion import *
 
 # ============================================================
 # CONSTANTES GLOBALES
@@ -605,6 +606,75 @@ def decidir_accion_agente_tonto(jugador, mapa, todos_los_jugadores):
 # BUCLE PRINCIPAL DE SIMULACIÓN
 # ============================================================
 
+def simular_partida_con_replay(jugadores, duracion_segundos=DURACION_PARTIDA_SEGUNDOS,
+                                usar_genoma=True, intervalo_grabacion=5):
+    """
+    Igual que simular_partida_con_jugadores, pero además graba una
+    "foto" del estado del mapa cada `intervalo_grabacion` ticks, para
+    poder reproducir la partida después como time-lapse.
+    """
+    mapa = crear_mapa()
+    puntos_equipo_A = 0
+    puntos_equipo_B = 0
+    decidir_accion = decidir_accion_genoma if usar_genoma else decidir_accion_agente_tonto
+
+    replay = []
+
+    for tick in range(duracion_segundos):
+        minuto_actual = tick // 60
+
+        for jugador in jugadores:
+            for escuadron in jugador.escuadrones():
+                if escuadron.estado in ("viajando_ataque", "viajando_ataque_jugador", "regresando_base"):
+                    escuadron.avanzar_un_tick()
+
+        procesar_llegadas(jugadores, mapa)
+
+        for jugador in jugadores:
+            jugador.actualizar_cooldown()
+
+        for jugador in jugadores:
+            decidir_accion(jugador, mapa, jugadores)
+
+        mapa_activo = [e for e in mapa if e.minuto_aparicion <= minuto_actual]
+        puntos_equipo_A += calcular_puntos_equipo_por_segundo(mapa_activo, "equipo_A")
+        puntos_equipo_B += calcular_puntos_equipo_por_segundo(mapa_activo, "equipo_B")
+        sumar_puntos_personales(mapa_activo, jugadores)
+
+        if tick % intervalo_grabacion == 0:
+            foto = {
+                "tick": tick,
+                "minuto": minuto_actual,
+                "puntos_A": round(puntos_equipo_A),
+                "puntos_B": round(puntos_equipo_B),
+                "edificios": [
+                    {"nombre": e.nombre, "x": e.x, "y": e.y, "dueño": e.dueño,
+                     "activo": e.minuto_aparicion <= minuto_actual}
+                    for e in mapa
+                ],
+                "escuadrones": [
+                    {"jugador": j.nombre, "equipo": j.equipo, "x": round(esc.x, 1),
+                     "y": round(esc.y, 1), "estado": esc.estado,
+                     "soldados": esc.soldados_actuales}
+                    for j in jugadores for esc in j.escuadrones()
+                    if esc.estado != "en_base"
+                ],
+                "jugadores_pos": [
+                    {"nombre": j.nombre, "equipo": j.equipo, "x": j.x, "y": j.y, "hits": j.hits}
+                    for j in jugadores
+                ],
+            }
+            replay.append(foto)
+
+    return {
+        "puntos_equipo_A": puntos_equipo_A,
+        "puntos_equipo_B": puntos_equipo_B,
+        "jugadores": jugadores,
+        "mapa": mapa,
+        "replay": replay,
+    }
+
+
 def crear_jugadores(cantidad_por_equipo):
     jugadores = []
     for i in range(cantidad_por_equipo):
@@ -805,7 +875,12 @@ def evolucionar(tamano_poblacion=80, jugadores_por_equipo=5, max_generaciones=20
         fitness_promedio = sum(fitness_valores) / len(fitness_valores)
         mejor_fitness_gen = max(fitness_valores)
 
-        historial.append({"generacion": gen, "promedio": fitness_promedio, "mejor": mejor_fitness_gen})
+        historial.append({
+            "generacion": gen,
+            "promedio": fitness_promedio,
+            "mejor": mejor_fitness_gen,
+            "pesos_promedio": [sum(g[i] for g in poblacion) / len(poblacion) for i in range(4)],
+        })
 
         if verbose:
             print(f"Generación {gen}: promedio={fitness_promedio:.0f}  mejor={mejor_fitness_gen:.0f}")
@@ -828,8 +903,11 @@ def evolucionar(tamano_poblacion=80, jugadores_por_equipo=5, max_generaciones=20
 
 
 if __name__ == "__main__":
-    resultado = simular_partida(cantidad_por_equipo=5, usar_genoma=False, verbose=True)
-    print()
-    print("=== RESULTADO (agente tonto, prueba rápida) ===")
-    print("Equipo A:", resultado["puntos_equipo_A"])
-    print("Equipo B:", resultado["puntos_equipo_B"])
+    resultado = evolucionar(
+        tamano_poblacion=100,      # ajustable
+        jugadores_por_equipo=11,   # ajustable (5-20, como el juego real)
+        max_generaciones=200,
+        generaciones_sin_mejora_limite=15,
+        verbose=True
+)
+    print(resultado["mejor_genoma"])
