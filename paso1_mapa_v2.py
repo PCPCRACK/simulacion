@@ -417,20 +417,32 @@ def procesar_llegadas(todos_los_jugadores, mapa):
 # ============================================================
 
 def decidir_accion_agente_tonto(jugador, mapa, todos_los_jugadores):
-    """
-    TODO: reglas fijas y simples para que un jugador decida qué hacer
-    con sus escuadrones que estén "en_base" sin nada asignado.
+    for escuadron in jugador.escuadrones():
+        if escuadron.estado != "en_base":
+            continue
 
-    Idea general que armaremos juntos:
-    - Si un escuadrón está "en_base" y el jugador no está en cooldown
-      de teletransporte, tal vez teletransportarse cerca de un objetivo.
-    - Para cada escuadrón "en_base" disponible, elegir el edificio
-      libre (o del enemigo) más cercano y mandarlo con enviar_a_atacar().
+        mejor_libre = None
+        menor_distancia_libre = None
+        for edificio in mapa:
+            if edificio.dueño == None:
+                if menor_distancia_libre == None or distancia([escuadron.x, escuadron.y], [edificio.x, edificio.y]) < menor_distancia_libre:
+                    menor_distancia_libre = distancia([escuadron.x, escuadron.y], [edificio.x, edificio.y])
+                    mejor_libre = edificio
+                    print(mejor_libre)   
+        if mejor_libre is not None:
+            escuadron.enviar_a_atacar(mejor_libre)
+            continue  # ya decidido, pasa al siguiente escuadrón
 
-    Por ahora esta función no hace nada -- se completa en el siguiente
-    paso, guiado.
-    """
-    pass
+        mejor_enemigo = None
+        menor_distancia_enemigo = None
+        for k in todos_los_jugadores:
+            if k.equipo != jugador.equipo:
+                if menor_distancia_enemigo == None or distancia([escuadron.x, escuadron.y], [k.x, k.y]) < menor_distancia_enemigo:
+                    menor_distancia_enemigo = distancia([escuadron.x, escuadron.y], [k.x, k.y])
+                    mejor_enemigo = k
+                    print(mejor_enemigo)
+        if mejor_enemigo is not None:
+            escuadron.enviar_a_atacar_jugador(mejor_enemigo)
 
 
 # ============================================================
