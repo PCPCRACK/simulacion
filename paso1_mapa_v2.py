@@ -212,7 +212,7 @@ class Escuadron:
 # ============================================================
 
 class Jugador:
-    def __init__(self, nombre, equipo, x, y):
+    def __init__(self, nombre, equipo, x, y, genoma=None):
         self.nombre = nombre
         self.equipo = equipo
         self.x = x
@@ -222,9 +222,9 @@ class Jugador:
         self.destino = None
         self.cooldown_teletransporte_restante = 0
 
-        # Genoma: [w1, w2, w3, w4] -- se puede pasar uno ya evolucionado,
-        # o si no se pasa ninguno, arranca con valores aleatorios (gen. 0)
-        self.genoma = [random.uniform(-1, 1) for _ in range(4)]
+        # Genoma: [w1, w2, w3, w4] -- si no se pasa uno ya evolucionado,
+        # arranca con valores aleatorios (generación 0)
+        self.genoma = genoma if genoma is not None else [random.uniform(-1, 1) for _ in range(4)]
 
         total_soldados = random.randint(18462, 26000)
         self.total_soldados_reserva = total_soldados  # baja cuando muere gente
@@ -616,6 +616,18 @@ def crear_jugadores(cantidad_por_equipo):
     return jugadores
 
 
+def crear_jugadores_con_genomas(genomas_equipo_A, genomas_equipo_B):
+    """Igual que crear_jugadores, pero cada jugador recibe un genoma específico."""
+    jugadores = []
+    for i, genoma in enumerate(genomas_equipo_A):
+        x, y = SPAWN_EQUIPO_A
+        jugadores.append(Jugador(nombre=f"A_{i}", equipo="equipo_A", x=x, y=y, genoma=genoma))
+    for i, genoma in enumerate(genomas_equipo_B):
+        x, y = SPAWN_EQUIPO_B
+        jugadores.append(Jugador(nombre=f"B_{i}", equipo="equipo_B", x=x, y=y, genoma=genoma))
+    return jugadores
+
+
 def calcular_fitness(jugador, equipo_ganador):
     """
     Fitness individual: domina el resultado del equipo (bono grande si
@@ -628,41 +640,43 @@ def calcular_fitness(jugador, equipo_ganador):
     return fitness
 
 
-def simular_partida(cantidad_por_equipo=5, duracion_segundos=DURACION_PARTIDA_SEGUNDOS, verbose=False):
+def simular_partida_con_jugadores(jugadores, duracion_segundos=DURACION_PARTIDA_SEGUNDOS,
+                                   usar_genoma=True, verbose=False):
+    """
+    Corre una partida completa con jugadores ya creados (con o sin
+    genoma específico). Es el motor real -- simular_partida() de abajo
+    es solo un envoltorio de conveniencia para pruebas rápidas.
+    """
     mapa = crear_mapa()
-    jugadores = crear_jugadores(cantidad_por_equipo)
 
     puntos_equipo_A = 0
     puntos_equipo_B = 0
 
+    decidir_accion = decidir_accion_genoma if usar_genoma else decidir_accion_agente_tonto
+
     for tick in range(duracion_segundos):
         minuto_actual = tick // 60
 
-        # 1. Mover todos los escuadrones que tengan destino
         for jugador in jugadores:
             for escuadron in jugador.escuadrones():
                 if escuadron.estado in ("viajando_ataque", "viajando_ataque_jugador", "regresando_base"):
                     escuadron.avanzar_un_tick()
 
-        # 2. Resolver llegadas (combates / capturas / relleno)
         procesar_llegadas(jugadores, mapa)
 
-        # 3. Actualizar cooldowns de teletransporte
         for jugador in jugadores:
             jugador.actualizar_cooldown()
 
-        # 4. Decisiones del agente (pendiente de implementar)
         for jugador in jugadores:
-            decidir_accion_agente_tonto(jugador, mapa, jugadores)
+            decidir_accion(jugador, mapa, jugadores)
 
-        # 5. Sumar puntos de este segundo (solo edificios ya desbloqueados)
         mapa_activo = [e for e in mapa if e.minuto_aparicion <= minuto_actual]
         puntos_equipo_A += calcular_puntos_equipo_por_segundo(mapa_activo, "equipo_A")
         puntos_equipo_B += calcular_puntos_equipo_por_segundo(mapa_activo, "equipo_B")
         sumar_puntos_personales(mapa_activo, jugadores)
 
         if verbose and tick % 300 == 0:
-            print(f"Tick {tick} (min {minuto_actual}): A={puntos_equipo_A:.0f}  B={puntos_equipo_B:.0f}")
+            print(f"  Tick {tick} (min {minuto_actual}): A={puntos_equipo_A:.0f}  B={puntos_equipo_B:.0f}")
 
     return {
         "puntos_equipo_A": puntos_equipo_A,
@@ -672,9 +686,150 @@ def simular_partida(cantidad_por_equipo=5, duracion_segundos=DURACION_PARTIDA_SE
     }
 
 
+def simular_partida(cantidad_por_equipo=5, duracion_segundos=DURACION_PARTIDA_SEGUNDOS,
+                     usar_genoma=False, verbose=False):
+    """Envoltorio de conveniencia: crea jugadores random y corre una partida."""
+    jugadores = crear_jugadores(cantidad_por_equipo)
+    return simular_partida_con_jugadores(jugadores, duracion_segundos, usar_genoma, verbose)
+
+
+# ============================================================
+# ALGORITMO GENÉTICO: torneo, selección, cruce, mutación
+# ============================================================
+
+RUIDO_MUTACION = 0.15   # cuánto puede variar un gen al cruzar
+CANTIDAD_ELITE = 4       # cuántos genomas top pasan intactos a la siguiente gen.
+
+
+def generar_genoma_aleatorio():
+    return [random.uniform(-1, 1) for _ in range(4)]
+
+
+def crear_poblacion_inicial(tamano):
+    return [generar_genoma_aleatorio() for _ in range(tamano)]
+
+
+def cruzar_genomas(genoma_a, genoma_b, ruido=RUIDO_MUTACION):
+    """
+    El hijo hereda cada gen COMPLETO de uno de los dos padres (al azar),
+    y se le agrega un poco de ruido (mutación) a cada gen.
+    """
+    hijo = []
+    for i in range(len(genoma_a)):
+        gen_heredado = random.choice([genoma_a[i], genoma_b[i]])
+        gen_mutado = gen_heredado + random.uniform(-ruido, ruido)
+        hijo.append(gen_mutado)
+    return hijo
+
+
+def ejecutar_torneo(poblacion, jugadores_por_equipo=5, verbose=False):
+    """
+    Arma 8 equipos aleatorios a partir de la población completa,
+    los empareja en 4 partidas (equipo_A vs equipo_B), corre cada
+    simulación, y devuelve el fitness de TODOS los jugadores de las
+    4 partidas juntos: [(genoma, fitness), (genoma, fitness), ...]
+    """
+    poblacion_barajada = poblacion.copy()
+    random.shuffle(poblacion_barajada)
+
+    equipos = [
+        poblacion_barajada[i * jugadores_por_equipo:(i + 1) * jugadores_por_equipo]
+        for i in range(8)
+    ]
+
+    resultados_fitness = []
+
+    for num_partida in range(4):
+        genomas_A = equipos[num_partida * 2]
+        genomas_B = equipos[num_partida * 2 + 1]
+
+        jugadores = crear_jugadores_con_genomas(genomas_A, genomas_B)
+        resultado = simular_partida_con_jugadores(jugadores, usar_genoma=True, verbose=False)
+
+        if resultado["puntos_equipo_A"] > resultado["puntos_equipo_B"]:
+            equipo_ganador = "equipo_A"
+        else:
+            equipo_ganador = "equipo_B"
+
+        if verbose:
+            print(f"  Partida {num_partida + 1}: A={resultado['puntos_equipo_A']:.0f} "
+                  f"B={resultado['puntos_equipo_B']:.0f}  Gana {equipo_ganador}")
+
+        for jugador in jugadores:
+            fit = calcular_fitness(jugador, equipo_ganador)
+            resultados_fitness.append((jugador.genoma, fit))
+
+    return resultados_fitness
+
+
+def crear_siguiente_generacion(resultados_fitness, tamano_poblacion):
+    """
+    Selecciona a los mejores genomas (por fitness individual, sin
+    importar de qué equipo vinieron), conserva una élite intacta, y
+    genera el resto de la población nueva por cruce + mutación.
+    """
+    ordenados = sorted(resultados_fitness, key=lambda par: par[1], reverse=True)
+    genomas_ordenados = [genoma for genoma, fit in ordenados]
+
+    elite = genomas_ordenados[:CANTIDAD_ELITE]
+
+    mitad = max(2, len(genomas_ordenados) // 2)
+    pool_padres = genomas_ordenados[:mitad]
+
+    nueva_poblacion = list(elite)
+    while len(nueva_poblacion) < tamano_poblacion:
+        padre_a = random.choice(pool_padres)
+        padre_b = random.choice(pool_padres)
+        hijo = cruzar_genomas(padre_a, padre_b)
+        nueva_poblacion.append(hijo)
+
+    return nueva_poblacion
+
+
+def evolucionar(tamano_poblacion=80, jugadores_por_equipo=5, max_generaciones=200,
+                 generaciones_sin_mejora_limite=15, verbose=True):
+    """
+    Ciclo completo de evolución. Se detiene cuando el mejor fitness no
+    mejora durante `generaciones_sin_mejora_limite` generaciones seguidas,
+    o al llegar a `max_generaciones` (límite de seguridad).
+    """
+    poblacion = crear_poblacion_inicial(tamano_poblacion)
+    mejor_fitness_historico = None
+    generaciones_sin_mejora = 0
+    historial = []
+
+    for gen in range(max_generaciones):
+        resultados = ejecutar_torneo(poblacion, jugadores_por_equipo)
+
+        fitness_valores = [fit for genoma, fit in resultados]
+        fitness_promedio = sum(fitness_valores) / len(fitness_valores)
+        mejor_fitness_gen = max(fitness_valores)
+
+        historial.append({"generacion": gen, "promedio": fitness_promedio, "mejor": mejor_fitness_gen})
+
+        if verbose:
+            print(f"Generación {gen}: promedio={fitness_promedio:.0f}  mejor={mejor_fitness_gen:.0f}")
+
+        if mejor_fitness_historico is None or mejor_fitness_gen > mejor_fitness_historico:
+            mejor_fitness_historico = mejor_fitness_gen
+            generaciones_sin_mejora = 0
+        else:
+            generaciones_sin_mejora += 1
+
+        if generaciones_sin_mejora >= generaciones_sin_mejora_limite:
+            if verbose:
+                print(f"Fitness sin mejorar por {generaciones_sin_mejora_limite} generaciones. Deteniendo.")
+            break
+
+        poblacion = crear_siguiente_generacion(resultados, tamano_poblacion)
+
+    mejor_genoma = max(resultados, key=lambda par: par[1])[0]
+    return {"poblacion_final": poblacion, "mejor_genoma": mejor_genoma, "historial": historial}
+
+
 if __name__ == "__main__":
-    resultado = simular_partida(cantidad_por_equipo=5, verbose=True)
+    resultado = simular_partida(cantidad_por_equipo=5, usar_genoma=False, verbose=True)
     print()
-    print("=== RESULTADO FINAL ===")
+    print("=== RESULTADO (agente tonto, prueba rápida) ===")
     print("Equipo A:", resultado["puntos_equipo_A"])
     print("Equipo B:", resultado["puntos_equipo_B"])
