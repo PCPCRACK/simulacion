@@ -170,16 +170,34 @@ function dibujar(idx, t) {
     ctx.fillText(nombre, x, y - 14);
   });
 
-  // Jugadores (bases): cuadraditos, interpolados salvo teletransporte
+  // Jugadores (bases): cuadraditos, interpolados salvo teletransporte.
+  // Cuando hay teletransporte, se dibuja un anillo que se expande en el
+  // punto de llegada para que el salto sea visible.
   const pos1J = {};
   f1.jugadores_pos.forEach(j => pos1J[j.nombre] = j);
   f0.jugadores_pos.forEach(j => {
     const jn = pos1J[j.nombre] || j;
     let jx = j.x, jy = j.y;
     const salto = Math.hypot(jn.x - j.x, jn.y - j.y);
-    if (salto < 30) { jx = lerp(j.x, jn.x, t); jy = lerp(j.y, jn.y, t); }
+    const esTeletransporte = salto >= 30;
+    if (!esTeletransporte) { jx = lerp(j.x, jn.x, t); jy = lerp(j.y, jn.y, t); }
     else if (t > 0.5) { jx = jn.x; jy = jn.y; }
     const x = escalar(jx), y = escalar(jy);
+
+    if (esTeletransporte) {
+      // anillo expandiéndose en el destino durante la transición
+      const rx = escalar(jn.x), ry = escalar(jn.y);
+      const progreso = Math.min(1, t * 1.6);
+      ctx.beginPath();
+      ctx.arc(rx, ry, 6 + progreso * 18, 0, Math.PI * 2);
+      ctx.strokeStyle = colorEquipo(j.equipo);
+      ctx.globalAlpha = 0.7 * (1 - progreso);
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = 1;
+    }
+
     ctx.beginPath();
     ctx.rect(x - 4, y - 4, 8, 8);
     ctx.fillStyle = colorEquipo(j.equipo);
@@ -279,6 +297,10 @@ VELOCIDAD_TROPAS = 2.2          # unidades de distancia por segundo
 COOLDOWN_TELETRANSPORTE = 120   # segundos
 K_COMBATE = 1.5                 # constante de la fórmula logística
 ESCALA_PUNTOS_KILL = 10_000      # divisor del poder eliminado -> puntos personales
+PUNTOS_POR_HIT = 500             # puntos por quitarle 1 hit a un jugador enemigo
+PUNTOS_POR_MUERTE = 2_000        # bono extra por completar la muerte (4to hit)
+# NOTA: estos dos son valores calibrados a ojo (no hay dato del juego real);
+# ajústalos cuando consigas el número verdadero.
 DURACION_PARTIDA_SEGUNDOS = 1800  # 30 minutos
 BONO_VICTORIA = 1_000_000         # domina sobre los puntos_personales típicos
 
@@ -477,6 +499,8 @@ class Jugador:
         self.y = y
         self.hits = 4
         self.puntos_personales = 0
+        self.puntos_por_kills = 0      # desglose: puntos ganados en combates
+        self.puntos_por_defensa = 0    # desglose: puntos por sostener edificios
         self.destino = None
         self.cooldown_teletransporte_restante = 0
 
@@ -571,13 +595,22 @@ class Jugador:
         for escuadron in self.escuadrones():
             escuadron.teletransportar_con_jugador(spawn_x, spawn_y)
 
-    def recibir_ataque_directo(self):
+    def recibir_ataque_directo(self, jugador_atacante=None):
         """
         Sistema 2: un escuadrón enemigo llegó hasta el jugador.
         Siempre resta 1 hit, sin importar si tenía defensa o no.
+        El atacante gana puntos por el hit, y un bono si completa la muerte.
         """
         self.hits -= 1
+
+        if jugador_atacante is not None:
+            jugador_atacante.puntos_personales += PUNTOS_POR_HIT
+            jugador_atacante.puntos_por_kills += PUNTOS_POR_HIT
+
         if self.hits <= 0:
+            if jugador_atacante is not None:
+                jugador_atacante.puntos_personales += PUNTOS_POR_MUERTE
+                jugador_atacante.puntos_por_kills += PUNTOS_POR_MUERTE
             self.morir()
 
     def actualizar_cooldown(self):
@@ -589,69 +622,101 @@ class Jugador:
 # DETECCIÓN Y RESOLUCIÓN DE COMBATE
 # ============================================================
 
-def buscar_defensor_en_edificio(edificio, equipo_atacante, todos_los_jugadores):
+def buscar_defensores_en_edificio(edificio, equipo_atacante, todos_los_jugadores):
     """
-    Busca si hay un escuadrón ENEMIGO defendiendo activamente este edificio.
-    Retorna el objeto Escuadron defensor, o None si no hay nadie.
+    Retorna la lista de TODOS los escuadrones enemigos defendiendo
+    activamente este edificio (puede haber hasta MAX_ESCUADRONES_POR_EDIFICIO).
     """
+    defensores = []
     for jugador in todos_los_jugadores:
         if jugador.equipo == equipo_atacante:
             continue
         for escuadron in jugador.escuadrones():
-            if escuadron.estado == "defendiendo" and escuadron.destino == edificio:
-                return escuadron
-    return None
+            if escuadron.estado == "defendiendo" and escuadron.destino is edificio:
+                defensores.append(escuadron)
+    return defensores
 
 
-def resolver_llegada_a_edificio(escuadron_atacante, edificio, todos_los_jugadores):
+def buscar_defensor_en_edificio(edificio, equipo_atacante, todos_los_jugadores):
+    """Compatibilidad: retorna el primer defensor o None."""
+    defensores = buscar_defensores_en_edificio(edificio, equipo_atacante, todos_los_jugadores)
+    return defensores[0] if defensores else None
+
+
+def resolver_llegada_a_edificio(escuadron_atacante, edificio, todos_los_jugadores, minuto_actual=None):
     """
     Se llama cuando un escuadrón termina su viaje hacia un Edificio.
-    Resuelve captura automática o combate, según corresponda.
+
+    Reglas (según el juego real):
+    - Si el edificio aún no está desbloqueado, no se puede esperar encima:
+      el escuadrón se regresa a base.
+    - Si no hay defensores: captura automática, se queda defendiendo.
+    - Si hay VARIOS defensores enemigos: el atacante los enfrenta EN
+      SECUENCIA con el poder que le vaya quedando. Solo captura el
+      edificio si elimina a todos; si pierde en cualquier pelea, se
+      regresa. Nunca coexisten defensores de equipos distintos.
     """
     equipo_atacante = escuadron_atacante.jugador_dueño.equipo
-    defensor = buscar_defensor_en_edificio(edificio, equipo_atacante, todos_los_jugadores)
 
-    if defensor is None:
+    # Edificio aún no desbloqueado: no existe "esperar al lado"
+    if minuto_actual is not None and edificio.minuto_aparicion > minuto_actual:
+        escuadron_atacante.regresar_a_base()
+        return
+
+    defensores = buscar_defensores_en_edificio(edificio, equipo_atacante, todos_los_jugadores)
+
+    if not defensores:
         # Nadie defendiendo -> captura automática
         edificio.dueño = equipo_atacante
         escuadron_atacante.destino = edificio
         escuadron_atacante.estado = "defendiendo"
         return
 
-    # Hay combate
-    poder_a = escuadron_atacante.poder_actual()
-    poder_b = defensor.poder_actual()
-    ganador = resolver_combate(poder_a, poder_b)
+    # Combates en secuencia contra cada defensor, con el poder restante
+    for defensor in defensores:
+        poder_a = escuadron_atacante.poder_actual()
+        poder_b = defensor.poder_actual()
 
-    poder_restante = abs(poder_a - poder_b)
+        if poder_a <= 0:
+            break  # ya no le queda nada con qué pelear
 
-    # Ambos bandos destruyen la misma cantidad de poder enemigo en esta
-    # pelea (el poder inicial del que pierde, completo), así que ambos
-    # ganan los mismos puntos personales por "matar", sin importar quién
-    # se queda con el edificio al final.
-    poder_eliminado = min(poder_a, poder_b)
-    puntos_por_kill = poder_eliminado / ESCALA_PUNTOS_KILL
-    escuadron_atacante.jugador_dueño.puntos_personales += puntos_por_kill
-    defensor.jugador_dueño.puntos_personales += puntos_por_kill
+        ganador = resolver_combate(poder_a, poder_b)
 
-    if ganador == "A":
-        # Gana el atacante
-        defensor.soldados_actuales = 0
-        defensor.regresar_a_base()
+        # Puntos por matar: el GANADOR gana los puntos completos del
+        # combate; el PERDEDOR gana solo la mitad.
+        poder_eliminado = min(poder_a, poder_b)
+        puntos_combate = poder_eliminado / ESCALA_PUNTOS_KILL
 
-        soldados_restantes = round(poder_restante / escuadron_atacante.poder_por_soldado)
-        escuadron_atacante.soldados_actuales = soldados_restantes
+        if ganador == "A":
+            # El defensor cae; el ganador conserva la MITAD de sus soldados
+            escuadron_atacante.jugador_dueño.puntos_personales += puntos_combate
+            escuadron_atacante.jugador_dueño.puntos_por_kills += puntos_combate
+            defensor.jugador_dueño.puntos_personales += puntos_combate / 2
+            defensor.jugador_dueño.puntos_por_kills += puntos_combate / 2
+
+            defensor.soldados_actuales = 0
+            defensor.regresar_a_base()
+            escuadron_atacante.soldados_actuales = escuadron_atacante.soldados_actuales // 2
+        else:
+            # El atacante cae; el defensor (ganador) conserva la mitad
+            defensor.jugador_dueño.puntos_personales += puntos_combate
+            defensor.jugador_dueño.puntos_por_kills += puntos_combate
+            escuadron_atacante.jugador_dueño.puntos_personales += puntos_combate / 2
+            escuadron_atacante.jugador_dueño.puntos_por_kills += puntos_combate / 2
+
+            escuadron_atacante.soldados_actuales = 0
+            escuadron_atacante.regresar_a_base()
+            defensor.soldados_actuales = defensor.soldados_actuales // 2
+            return  # perdió: se va, el edificio queda como estaba
+
+    # Si llegó aquí, eliminó a TODOS los defensores (y le queda algo)
+    if escuadron_atacante.poder_actual() > 0:
+        edificio.dueño = equipo_atacante
         escuadron_atacante.destino = edificio
         escuadron_atacante.estado = "defendiendo"
-        edificio.dueño = equipo_atacante
     else:
-        # Gana el defensor
-        escuadron_atacante.soldados_actuales = 0
+        # Caso límite: ganó la última pelea pero quedó exactamente en 0
         escuadron_atacante.regresar_a_base()
-
-        soldados_restantes = round(poder_restante / defensor.poder_por_soldado)
-        defensor.soldados_actuales = soldados_restantes
-        # el edificio se queda igual, el defensor sigue ahí
 
 
 def resolver_llegada_a_jugador(escuadron_atacante, jugador_destino):
@@ -669,7 +734,7 @@ def resolver_llegada_a_jugador(escuadron_atacante, jugador_destino):
         escuadron_atacante.rellenar_desde_reserva()
     else:
         # Es un jugador enemigo -> Sistema 2, ataque directo
-        jugador_destino.recibir_ataque_directo()
+        jugador_destino.recibir_ataque_directo(escuadron_atacante.jugador_dueño)
         escuadron_atacante.regresar_a_base()
 
 
@@ -686,9 +751,10 @@ def sumar_puntos_personales(mapa_activo, todos_los_jugadores):
             for escuadron in jugador.escuadrones():
                 if escuadron.estado == "defendiendo" and escuadron.destino is edificio:
                     jugador.puntos_personales += edificio.tasa_personal
+                    jugador.puntos_por_defensa += edificio.tasa_personal
 
 
-def procesar_llegadas(todos_los_jugadores, mapa):
+def procesar_llegadas(todos_los_jugadores, mapa, minuto_actual=None):
     """
     Recorre todos los escuadrones del mapa; los que llegaron a destino
     este tick ("llego_a_destino") se resuelven según el tipo de destino.
@@ -697,7 +763,8 @@ def procesar_llegadas(todos_los_jugadores, mapa):
         for escuadron in jugador.escuadrones():
             if escuadron.estado == "llego_a_destino":
                 if isinstance(escuadron.destino, Edificio):
-                    resolver_llegada_a_edificio(escuadron, escuadron.destino, todos_los_jugadores)
+                    resolver_llegada_a_edificio(escuadron, escuadron.destino,
+                                                 todos_los_jugadores, minuto_actual)
                 elif isinstance(escuadron.destino, Jugador):
                     resolver_llegada_a_jugador(escuadron, escuadron.destino)
 
@@ -725,6 +792,8 @@ def decidir_accion_genoma(jugador, mapa, todos_los_jugadores):
                 asignados = contar_escuadrones_asignados(edificio, jugador.equipo, todos_los_jugadores)
                 if asignados >= MAX_ESCUADRONES_POR_EDIFICIO:
                     continue
+                if jugador_ya_asignado_a(edificio, jugador):
+                    continue  # un escuadrón por jugador por edificio (salvo camps)
                 score = puntaje_edificio(escuadron, jugador, edificio, todos_los_jugadores)
                 if mejor_score is None or score > mejor_score:
                     mejor_score = score
@@ -737,6 +806,8 @@ def decidir_accion_genoma(jugador, mapa, todos_los_jugadores):
             asignados = contar_escuadrones_asignados(enemigo, jugador.equipo, todos_los_jugadores)
             if asignados >= MAX_ESCUADRONES_POR_EDIFICIO:
                 continue
+            if jugador_ya_asignado_a(enemigo, jugador):
+                continue  # tampoco puede mandar 2 escuadrones al mismo jugador
             score = puntaje_jugador_enemigo(escuadron, jugador, enemigo, todos_los_jugadores)
             if mejor_score is None or score > mejor_score:
                 mejor_score = score
@@ -845,6 +916,24 @@ def contar_escuadrones_asignados(destino_objetivo, equipo, todos_los_jugadores):
     return contador
 
 
+def jugador_ya_asignado_a(destino_objetivo, jugador):
+    """
+    Regla del juego: un jugador solo puede mandar UN escuadrón a cada
+    edificio/objetivo... EXCEPTO a los campamentos, donde sí puede mandar
+    varios a la vez (para recolectar más).
+    Retorna True si este jugador ya tiene un escuadrón asignado a ese
+    destino y por lo tanto NO puede mandar otro.
+    """
+    if isinstance(destino_objetivo, Edificio) and "campamento" in destino_objetivo.nombre:
+        return False  # los campamentos no tienen esta restricción
+    for esc in jugador.escuadrones():
+        if esc.destino is destino_objetivo and esc.estado in (
+            "viajando_ataque", "defendiendo", "viajando_ataque_jugador"
+        ):
+            return True
+    return False
+
+
 def puntaje_edificio(escuadron, jugador, edificio, todos_los_jugadores):
     """Qué tan atractivo le parece a este genoma ir a este edificio."""
     w1, w2, w3, w4 = jugador.genoma
@@ -911,6 +1000,8 @@ def decidir_accion_agente_tonto(jugador, mapa, todos_los_jugadores):
                 ya_asignados = contar_escuadrones_asignados(edificio, jugador.equipo, todos_los_jugadores)
                 if ya_asignados >= MAX_ESCUADRONES_POR_EDIFICIO:
                     continue
+                if jugador_ya_asignado_a(edificio, jugador):
+                    continue  # un escuadrón por jugador por edificio (salvo camps)
                 d = distancia((escuadron.x, escuadron.y), (edificio.x, edificio.y))
                 if menor_distancia_libre is None or d < menor_distancia_libre:
                     menor_distancia_libre = d
@@ -973,6 +1064,20 @@ def simular_partida_con_replay(jugadores, duracion_segundos=DURACION_PARTIDA_SEG
     puntos_equipo_B = 0
     decidir_accion = decidir_accion_genoma if usar_genoma else decidir_accion_agente_tonto
 
+    # Desglose de puntos de ALIANZA por fuente (para el reporte final)
+    def categoria_de(edificio):
+        n = edificio.nombre
+        if "campamento" in n:
+            return "campamentos"
+        if n == "castillo":
+            return "castillo"
+        return "otros edificios"
+
+    desglose_alianza = {
+        "equipo_A": {"castillo": 0.0, "otros edificios": 0.0, "campamentos": 0.0, "bono observatorio": 0.0},
+        "equipo_B": {"castillo": 0.0, "otros edificios": 0.0, "campamentos": 0.0, "bono observatorio": 0.0},
+    }
+
     # Foto del estado inicial (todos en su spawn, antes de cualquier decisión)
     replay = [_foto_del_estado(-1, 0, 0, 0, mapa, jugadores)]
 
@@ -984,20 +1089,31 @@ def simular_partida_con_replay(jugadores, duracion_segundos=DURACION_PARTIDA_SEG
                 if escuadron.estado in ("viajando_ataque", "viajando_ataque_jugador", "regresando_base"):
                     escuadron.avanzar_un_tick()
 
-        procesar_llegadas(jugadores, mapa)
+        mapa_activo = [e for e in mapa if e.minuto_aparicion <= minuto_actual]
+
+        procesar_llegadas(jugadores, mapa, minuto_actual)
 
         for jugador in jugadores:
             jugador.actualizar_cooldown()
 
         for jugador in jugadores:
-            decidir_teletransporte(jugador, mapa, jugadores)
+            decidir_teletransporte(jugador, mapa_activo, jugadores)
 
         for jugador in jugadores:
-            decidir_accion(jugador, mapa, jugadores)
+            decidir_accion(jugador, mapa_activo, jugadores)
 
-        mapa_activo = [e for e in mapa if e.minuto_aparicion <= minuto_actual]
-        puntos_equipo_A += calcular_puntos_equipo_por_segundo(mapa_activo, "equipo_A")
-        puntos_equipo_B += calcular_puntos_equipo_por_segundo(mapa_activo, "equipo_B")
+        for equipo in ("equipo_A", "equipo_B"):
+            total_con_bono = calcular_puntos_equipo_por_segundo(mapa_activo, equipo)
+            total_base = 0
+            for e in mapa_activo:
+                if e.dueño == equipo:
+                    desglose_alianza[equipo][categoria_de(e)] += e.tasa_alianza
+                    total_base += e.tasa_alianza
+            desglose_alianza[equipo]["bono observatorio"] += total_con_bono - total_base
+            if equipo == "equipo_A":
+                puntos_equipo_A += total_con_bono
+            else:
+                puntos_equipo_B += total_con_bono
         sumar_puntos_personales(mapa_activo, jugadores)
 
         if tick % intervalo_grabacion == 0:
@@ -1010,6 +1126,7 @@ def simular_partida_con_replay(jugadores, duracion_segundos=DURACION_PARTIDA_SEG
         "jugadores": jugadores,
         "mapa": mapa,
         "replay": replay,
+        "desglose_alianza": desglose_alianza,
     }
 
 
@@ -1070,18 +1187,19 @@ def simular_partida_con_jugadores(jugadores, duracion_segundos=DURACION_PARTIDA_
                 if escuadron.estado in ("viajando_ataque", "viajando_ataque_jugador", "regresando_base"):
                     escuadron.avanzar_un_tick()
 
-        procesar_llegadas(jugadores, mapa)
+        mapa_activo = [e for e in mapa if e.minuto_aparicion <= minuto_actual]
+
+        procesar_llegadas(jugadores, mapa, minuto_actual)
 
         for jugador in jugadores:
             jugador.actualizar_cooldown()
 
         for jugador in jugadores:
-            decidir_teletransporte(jugador, mapa, jugadores)
+            decidir_teletransporte(jugador, mapa_activo, jugadores)
 
         for jugador in jugadores:
-            decidir_accion(jugador, mapa, jugadores)
+            decidir_accion(jugador, mapa_activo, jugadores)
 
-        mapa_activo = [e for e in mapa if e.minuto_aparicion <= minuto_actual]
         puntos_equipo_A += calcular_puntos_equipo_por_segundo(mapa_activo, "equipo_A")
         puntos_equipo_B += calcular_puntos_equipo_por_segundo(mapa_activo, "equipo_B")
         sumar_puntos_personales(mapa_activo, jugadores)
@@ -1133,43 +1251,56 @@ def cruzar_genomas(genoma_a, genoma_b, ruido=RUIDO_MUTACION):
     return hijo
 
 
-def ejecutar_torneo(poblacion, jugadores_por_equipo=5, verbose=False):
+def ejecutar_torneo(poblacion, jugadores_por_equipo=5, partidas_por_genoma=3, verbose=False):
     """
-    Arma 8 equipos aleatorios a partir de la población completa,
-    los empareja en 4 partidas (equipo_A vs equipo_B), corre cada
-    simulación, y devuelve el fitness de TODOS los jugadores de las
-    4 partidas juntos: [(genoma, fitness), (genoma, fitness), ...]
-    """
-    poblacion_barajada = poblacion.copy()
-    random.shuffle(poblacion_barajada)
+    Cada "ronda" arma 8 equipos aleatorios a partir de la población y corre
+    4 partidas. Esto se repite `partidas_por_genoma` veces (rebarajando la
+    población cada vez), de modo que cada genoma juega varias partidas con
+    compañeros y rivales distintos. El fitness final de cada genoma es el
+    PROMEDIO de sus partidas -- mucho menos ruidoso que una sola partida.
 
-    equipos = [
-        poblacion_barajada[i * jugadores_por_equipo:(i + 1) * jugadores_por_equipo]
-        for i in range(8)
+    Devuelve: [(genoma, fitness_promedio), ...]
+    """
+    acumulado = {}  # id(genoma) -> [genoma, suma_fitness, cantidad_partidas]
+
+    for ronda in range(partidas_por_genoma):
+        poblacion_barajada = poblacion.copy()
+        random.shuffle(poblacion_barajada)
+
+        equipos = [
+            poblacion_barajada[i * jugadores_por_equipo:(i + 1) * jugadores_por_equipo]
+            for i in range(8)
+        ]
+
+        for num_partida in range(4):
+            genomas_A = equipos[num_partida * 2]
+            genomas_B = equipos[num_partida * 2 + 1]
+
+            jugadores = crear_jugadores_con_genomas(genomas_A, genomas_B)
+            resultado = simular_partida_con_jugadores(jugadores, usar_genoma=True, verbose=False)
+
+            if resultado["puntos_equipo_A"] > resultado["puntos_equipo_B"]:
+                equipo_ganador = "equipo_A"
+            else:
+                equipo_ganador = "equipo_B"
+
+            if verbose:
+                print(f"  Ronda {ronda + 1} partida {num_partida + 1}: "
+                      f"A={resultado['puntos_equipo_A']:.0f} B={resultado['puntos_equipo_B']:.0f}  "
+                      f"Gana {equipo_ganador}")
+
+            for jugador in jugadores:
+                fit = calcular_fitness(jugador, equipo_ganador)
+                clave = id(jugador.genoma)
+                if clave not in acumulado:
+                    acumulado[clave] = [jugador.genoma, 0.0, 0]
+                acumulado[clave][1] += fit
+                acumulado[clave][2] += 1
+
+    resultados_fitness = [
+        (genoma, suma / cantidad)
+        for genoma, suma, cantidad in acumulado.values()
     ]
-
-    resultados_fitness = []
-
-    for num_partida in range(4):
-        genomas_A = equipos[num_partida * 2]
-        genomas_B = equipos[num_partida * 2 + 1]
-
-        jugadores = crear_jugadores_con_genomas(genomas_A, genomas_B)
-        resultado = simular_partida_con_jugadores(jugadores, usar_genoma=True, verbose=False)
-
-        if resultado["puntos_equipo_A"] > resultado["puntos_equipo_B"]:
-            equipo_ganador = "equipo_A"
-        else:
-            equipo_ganador = "equipo_B"
-
-        if verbose:
-            print(f"  Partida {num_partida + 1}: A={resultado['puntos_equipo_A']:.0f} "
-                  f"B={resultado['puntos_equipo_B']:.0f}  Gana {equipo_ganador}")
-
-        for jugador in jugadores:
-            fit = calcular_fitness(jugador, equipo_ganador)
-            resultados_fitness.append((jugador.genoma, fit))
-
     return resultados_fitness
 
 
@@ -1198,19 +1329,35 @@ def crear_siguiente_generacion(resultados_fitness, tamano_poblacion):
 
 
 def evolucionar(tamano_poblacion=80, jugadores_por_equipo=5, max_generaciones=200,
-                 generaciones_sin_mejora_limite=15, verbose=True):
+                 generaciones_sin_mejora_limite=25, partidas_por_genoma=3,
+                 umbral_mejora=0.002, verbose=True):
     """
-    Ciclo completo de evolución. Se detiene cuando el mejor fitness no
-    mejora durante `generaciones_sin_mejora_limite` generaciones seguidas,
-    o al llegar a `max_generaciones` (límite de seguridad).
+    Ciclo completo de evolución.
+
+    Criterio de parada: se detiene cuando el FITNESS PROMEDIO de la
+    población no mejora (en al menos `umbral_mejora`, proporcional) durante
+    `generaciones_sin_mejora_limite` generaciones seguidas, o al llegar a
+    `max_generaciones`. Se usa el promedio y no el mejor porque el mejor
+    fitness toca su techo casi de inmediato (bono de victoria + máximo
+    natural de puntos personales) y no refleja el aprendizaje real de la
+    población.
+
+    Cada genoma juega `partidas_por_genoma` partidas por generación con
+    equipos rebarajados, y su fitness es el promedio -- menos ruido que
+    una sola partida.
     """
     poblacion = crear_poblacion_inicial(tamano_poblacion)
-    mejor_fitness_historico = None
+    mejor_promedio_historico = None
     generaciones_sin_mejora = 0
     historial = []
+    mejor_genoma_gen0 = None
 
     for gen in range(max_generaciones):
-        resultados = ejecutar_torneo(poblacion, jugadores_por_equipo)
+        resultados = ejecutar_torneo(poblacion, jugadores_por_equipo,
+                                      partidas_por_genoma=partidas_por_genoma)
+
+        if gen == 0:
+            mejor_genoma_gen0 = max(resultados, key=lambda par: par[1])[0]
 
         fitness_valores = [fit for genoma, fit in resultados]
         fitness_promedio = sum(fitness_valores) / len(fitness_valores)
@@ -1226,15 +1373,15 @@ def evolucionar(tamano_poblacion=80, jugadores_por_equipo=5, max_generaciones=20
         if verbose:
             print(f"Generación {gen}: promedio={fitness_promedio:.0f}  mejor={mejor_fitness_gen:.0f}")
 
-        if mejor_fitness_historico is None or mejor_fitness_gen > mejor_fitness_historico:
-            mejor_fitness_historico = mejor_fitness_gen
+        if mejor_promedio_historico is None or fitness_promedio > mejor_promedio_historico * (1 + umbral_mejora):
+            mejor_promedio_historico = max(fitness_promedio, mejor_promedio_historico or 0)
             generaciones_sin_mejora = 0
         else:
             generaciones_sin_mejora += 1
 
         if generaciones_sin_mejora >= generaciones_sin_mejora_limite:
             if verbose:
-                print(f"Fitness sin mejorar por {generaciones_sin_mejora_limite} generaciones. Deteniendo.")
+                print(f"Promedio sin mejorar por {generaciones_sin_mejora_limite} generaciones. Deteniendo.")
             break
 
         poblacion = crear_siguiente_generacion(resultados, tamano_poblacion)
@@ -1243,20 +1390,58 @@ def evolucionar(tamano_poblacion=80, jugadores_por_equipo=5, max_generaciones=20
     return {
         "poblacion_final": poblacion,
         "mejor_genoma": mejor_genoma,
+        "mejor_genoma_gen0": mejor_genoma_gen0,  # el mejor "ancestro" sin evolucionar
         "historial": historial,
         "ultimos_resultados": resultados,  # (genoma, fitness) de la última generación evaluada
     }
 
 
-def jugar_gran_final(ultimos_resultados, jugadores_por_equipo=5, intervalo_grabacion=5, verbose=True):
+def jugar_gran_final(ultimos_resultados, jugadores_por_equipo=5, intervalo_grabacion=5,
+                      n_candidatos=8, verbose=True):
     """
-    Toma los 2 mejores genomas de la última generación evaluada y los
-    enfrenta en una partida dedicada (cada equipo lleno de copias de
-    "su" mejor genoma). Devuelve el resultado + el replay para visualizar.
+    Selecciona a los finalistas con un PLAYOFF real, no solo por fitness:
+
+    1. Toma los `n_candidatos` mejores genomas por fitness (preselección).
+    2. Los enfrenta todos-contra-todos con equipos de CLONES (cada equipo
+       lleno de copias del mismo genoma) -- así se elimina la suerte de
+       "me tocaron buenos compañeros" que contamina el fitness del torneo.
+    3. Los 2 con más victorias en el playoff (desempate por diferencia de
+       puntos) juegan la gran final, que se graba con replay.
     """
     ordenados = sorted(ultimos_resultados, key=lambda par: par[1], reverse=True)
-    genoma_1 = ordenados[0][0]
-    genoma_2 = ordenados[1][0]
+    candidatos = [genoma for genoma, fit in ordenados[:n_candidatos]]
+
+    # Playoff todos-contra-todos
+    victorias = [0] * len(candidatos)
+    diferencia_puntos = [0.0] * len(candidatos)
+
+    for i in range(len(candidatos)):
+        for j in range(i + 1, len(candidatos)):
+            jugadores = crear_jugadores_con_genomas(
+                [candidatos[i]] * jugadores_por_equipo,
+                [candidatos[j]] * jugadores_por_equipo,
+            )
+            r = simular_partida_con_jugadores(jugadores, usar_genoma=True, verbose=False)
+            dif = r["puntos_equipo_A"] - r["puntos_equipo_B"]
+            diferencia_puntos[i] += dif
+            diferencia_puntos[j] -= dif
+            if dif > 0:
+                victorias[i] += 1
+            else:
+                victorias[j] += 1
+
+    ranking = sorted(range(len(candidatos)),
+                     key=lambda k: (victorias[k], diferencia_puntos[k]), reverse=True)
+
+    if verbose:
+        print(f"  === PLAYOFF ({n_candidatos} candidatos, todos contra todos) ===")
+        for pos, k in enumerate(ranking, 1):
+            print(f"  {pos}. victorias={victorias[k]}  dif_puntos={diferencia_puntos[k]:+.0f}  "
+                  f"genoma={[round(g, 2) for g in candidatos[k]]}")
+        print()
+
+    genoma_1 = candidatos[ranking[0]]
+    genoma_2 = candidatos[ranking[1]]
 
     genomas_A = [genoma_1] * jugadores_por_equipo
     genomas_B = [genoma_2] * jugadores_por_equipo
@@ -1270,10 +1455,94 @@ def jugar_gran_final(ultimos_resultados, jugadores_por_equipo=5, intervalo_graba
         print(f"  genoma #1: {[round(g, 3) for g in genoma_1]}")
         print(f"  genoma #2: {[round(g, 3) for g in genoma_2]}")
         print(f"  Resultado: A={resultado['puntos_equipo_A']:.0f}  B={resultado['puntos_equipo_B']:.0f}")
+        print()
+        print("  === DESGLOSE DE PUNTOS DE ALIANZA POR FUENTE ===")
+        for equipo in ("equipo_A", "equipo_B"):
+            d = resultado["desglose_alianza"][equipo]
+            total = sum(d.values())
+            print(f"  {equipo} (total {total:.0f}):")
+            for fuente, pts in d.items():
+                pct = (pts / total * 100) if total > 0 else 0
+                print(f"    {fuente}: {pts:.0f}  ({pct:.1f}%)")
+        print()
+        print("  === PUNTOS PERSONALES POR FUENTE (suma del equipo) ===")
+        for equipo in ("equipo_A", "equipo_B"):
+            jugadores_eq = [j for j in resultado["jugadores"] if j.equipo == equipo]
+            defensa = sum(j.puntos_por_defensa for j in jugadores_eq)
+            kills = sum(j.puntos_por_kills for j in jugadores_eq)
+            print(f"  {equipo}: defensa de edificios={defensa:.0f}  batallas={kills:.0f}")
 
     resultado["genoma_1"] = genoma_1
     resultado["genoma_2"] = genoma_2
     return resultado
+
+
+def jugar_batalla(genoma_equipo_A, genoma_equipo_B, jugadores_por_equipo=5,
+                   intervalo_grabacion=5, titulo="Batalla", verbose=True):
+    """
+    Enfrenta dos genomas específicos: cada equipo se llena con copias del
+    suyo. Devuelve el resultado completo con replay, listo para visualizar.
+    """
+    genomas_A = [genoma_equipo_A] * jugadores_por_equipo
+    genomas_B = [genoma_equipo_B] * jugadores_por_equipo
+
+    jugadores = crear_jugadores_con_genomas(genomas_A, genomas_B)
+    resultado = simular_partida_con_replay(jugadores, usar_genoma=True,
+                                            intervalo_grabacion=intervalo_grabacion)
+    if verbose:
+        print(f"{titulo}: A={resultado['puntos_equipo_A']:.0f}  B={resultado['puntos_equipo_B']:.0f}")
+
+    resultado["titulo"] = titulo
+    return resultado
+
+
+def generar_replay_html_multiple(batallas, ruta_salida):
+    """
+    Genera un solo HTML con VARIAS batallas y un selector para cambiar
+    entre ellas. `batallas` es una lista de dicts con claves:
+    "titulo" (texto del selector) y "replay" (los frames grabados).
+    """
+    import json
+
+    datos = [{"titulo": b["titulo"], "replay": b["replay"]} for b in batallas]
+    datos_json = json.dumps(datos)
+
+    plantilla = _PLANTILLA_HTML_REPLAY.replace(
+        "const replay = REPLAY_DATA_PLACEHOLDER;",
+        "const batallas = " + datos_json + ";\n"
+        "let replay = batallas[0].replay;"
+    )
+
+    # Insertar el selector de batalla junto a los controles
+    plantilla = plantilla.replace(
+        '<button id="btnPlay">Reproducir</button>',
+        '<select id="selBatalla"></select>\n  <button id="btnPlay">Reproducir</button>'
+    )
+
+    # Lógica JS del selector, inyectada antes del primer dibujado
+    plantilla = plantilla.replace(
+        "dibujar(0, 0);",
+        """const selBatalla = document.getElementById('selBatalla');
+batallas.forEach((b, i) => {
+  const op = document.createElement('option');
+  op.value = i; op.textContent = b.titulo;
+  selBatalla.appendChild(op);
+});
+selBatalla.addEventListener('change', () => {
+  pause();
+  replay = batallas[parseInt(selBatalla.value)].replay;
+  slider.max = replay.length - 1;
+  cursor = 0;
+  dibujar(0, 0);
+});
+
+dibujar(0, 0);"""
+    )
+
+    with open(ruta_salida, "w") as f:
+        f.write(plantilla)
+
+    return ruta_salida
 
 
 def generar_replay_html(replay, ruta_salida):
@@ -1295,8 +1564,56 @@ def generar_replay_html(replay, ruta_salida):
 
 
 if __name__ == "__main__":
-    resultado = simular_partida(cantidad_por_equipo=5, usar_genoma=False, verbose=True)
+    # ==========================================================
+    # CONFIGURACIÓN -- cambia estos valores a lo que quieras.
+    # Los números que ves en las funciones (tamano_poblacion=80, etc.)
+    # son solo valores POR DEFECTO: se usan únicamente si no pasas nada.
+    # Aquí los sobreescribimos con lo que definas en estas variables.
+    #
+    # IMPORTANTE: tamano_poblacion debe ser >= 8 * jugadores_por_equipo
+    # (el torneo arma 8 equipos por ronda). Ej: 11 por equipo -> mínimo 88.
+    # ==========================================================
+    TAMANO_POBLACION = 110
+    JUGADORES_POR_EQUIPO = 11
+    MAX_GENERACIONES = 250
+    PACIENCIA = 40            # generaciones sin mejora del promedio antes de parar
+    PARTIDAS_POR_GENOMA = 4   # más partidas = menos ruido, más lento
+
+    if TAMANO_POBLACION < 8 * JUGADORES_POR_EQUIPO:
+        raise SystemExit(f"tamano_poblacion ({TAMANO_POBLACION}) debe ser >= "
+                         f"8 * jugadores_por_equipo ({8 * JUGADORES_POR_EQUIPO})")
+
+    print(f"Evolucionando: población={TAMANO_POBLACION}, "
+          f"{JUGADORES_POR_EQUIPO} por equipo, {PARTIDAS_POR_GENOMA} partidas/genoma")
     print()
-    print("=== RESULTADO (agente tonto, prueba rápida) ===")
-    print("Equipo A:", resultado["puntos_equipo_A"])
-    print("Equipo B:", resultado["puntos_equipo_B"])
+
+    res = evolucionar(
+        tamano_poblacion=TAMANO_POBLACION,
+        jugadores_por_equipo=JUGADORES_POR_EQUIPO,
+        max_generaciones=MAX_GENERACIONES,
+        generaciones_sin_mejora_limite=PACIENCIA,
+        partidas_por_genoma=PARTIDAS_POR_GENOMA,
+        verbose=True,
+    )
+
+    print()
+    print("Mejor genoma encontrado:", [round(g, 3) for g in res["mejor_genoma"]])
+    print()
+
+    res_final = jugar_gran_final(res["ultimos_resultados"],
+                                  jugadores_por_equipo=JUGADORES_POR_EQUIPO)
+
+    # Batalla extra: el CAMPEÓN DEL PLAYOFF contra el mejor "ancestro"
+    # de la generación 0 -- mide cuánto aprendió la evolución en absoluto.
+    res_vs_origen = jugar_batalla(
+        res_final["genoma_1"], res["mejor_genoma_gen0"],
+        jugadores_por_equipo=JUGADORES_POR_EQUIPO,
+        titulo="Campeón del playoff (A) vs mejor de generación 0 (B)",
+    )
+
+    generar_replay_html_multiple([
+        {"titulo": "Gran final: campeón vs subcampeón del playoff", "replay": res_final["replay"]},
+        {"titulo": "Campeón vs mejor de generación 0", "replay": res_vs_origen["replay"]},
+    ], "gran_final.html")
+    print()
+    print("Replay con las DOS batallas guardado en: gran_final.html")
