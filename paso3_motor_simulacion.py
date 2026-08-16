@@ -12,7 +12,264 @@ resto del proyecto.
 
 import math
 import random
-from paso3_motor_simulacion import *
+
+_PLANTILLA_HTML_REPLAY = """<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Elixir Scramble -- Replay de partida</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #151b23;
+    --line: #263140;
+    --team-a: #5aa9e6;
+    --team-a-dim: #2d4f66;
+    --team-b: #e6615a;
+    --team-b-dim: #663333;
+    --free: #4a5568;
+    --text: #d7dee6;
+    --text-dim: #7c8a99;
+    --accent: #e6b85a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px 12px 40px;
+  }
+  h1 { font-size: 1.1rem; font-weight: 600; letter-spacing: 0.03em; margin: 0 0 4px; }
+  .subt { color: var(--text-dim); font-size: 0.8rem; margin-bottom: 16px; }
+  .marcador {
+    display: flex; gap: 24px; align-items: center;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 10px 22px; margin-bottom: 14px;
+    font-variant-numeric: tabular-nums;
+  }
+  .equipo { display: flex; align-items: center; gap: 8px; font-size: 1.05rem; font-weight: 600; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .dot.a { background: var(--team-a); }
+  .dot.b { background: var(--team-b); }
+  .tiempo { color: var(--accent); font-weight: 600; min-width: 90px; text-align: center; }
+  canvas { background: #0a0e14; border: 1px solid var(--line); border-radius: 10px; }
+  .controles { display: flex; align-items: center; gap: 12px; margin-top: 14px; width: 100%; max-width: 720px; }
+  button {
+    background: var(--panel); border: 1px solid var(--line); color: var(--text);
+    border-radius: 8px; padding: 8px 14px; cursor: pointer; font-size: 0.85rem;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  input[type=range] { flex: 1; accent-color: var(--accent); }
+  select {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 8px; font-size: 0.8rem;
+  }
+  .leyenda {
+    display: flex; gap: 18px; margin-top: 14px; font-size: 0.75rem;
+    color: var(--text-dim); flex-wrap: wrap; justify-content: center; max-width: 720px;
+  }
+  .leyenda span { display: flex; align-items: center; gap: 5px; }
+  .sq { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+</style>
+</head>
+<body>
+
+<h1>ELIXIR SCRAMBLE -- REPLAY DE PARTIDA</h1>
+<div class="subt">Time-lapse de la simulacion, con interpolacion de movimiento entre fotogramas</div>
+
+<div class="marcador">
+  <div class="equipo"><span class="dot a"></span><span id="pa">0</span></div>
+  <div class="tiempo" id="reloj">00:00</div>
+  <div class="equipo"><span id="pb">0</span><span class="dot b"></span></div>
+</div>
+
+<canvas id="mapa" width="700" height="700"></canvas>
+
+<div class="controles">
+  <button id="btnPlay">Reproducir</button>
+  <input type="range" id="slider" min="0" max="0" value="0" step="1">
+  <select id="velocidad">
+    <option value="1">1x</option>
+    <option value="3" selected>3x</option>
+    <option value="8">8x</option>
+    <option value="30">30x</option>
+  </select>
+</div>
+
+<div class="leyenda">
+  <span><i class="sq" style="background:var(--team-a)"></i> Equipo A</span>
+  <span><i class="sq" style="background:var(--team-b)"></i> Equipo B</span>
+  <span><i class="sq" style="background:var(--free);border-radius:50%"></i> Edificio libre</span>
+  <span><i class="sq" style="border:1px dashed var(--free);background:transparent;border-radius:50%"></i> Edificio aun no disponible</span>
+</div>
+
+<script>
+const replay = REPLAY_DATA_PLACEHOLDER;
+
+const canvas = document.getElementById('mapa');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const MAPA_MAX = 1000;
+
+function escalar(v) { return v / MAPA_MAX * W; }
+function getCss(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function colorEquipo(equipo) {
+  if (equipo === 'equipo_A') return getCss('--team-a');
+  if (equipo === 'equipo_B') return getCss('--team-b');
+  return getCss('--free');
+}
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+// Interpola posiciones entre el frame idx y el idx+1 con factor t (0..1).
+// Si la distancia del salto es enorme (teletransporte), no interpola: salta.
+function dibujar(idx, t) {
+  const f0 = replay[Math.floor(idx)];
+  const f1 = replay[Math.min(Math.floor(idx) + 1, replay.length - 1)];
+  ctx.clearRect(0, 0, W, H);
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 10; i++) {
+    const p = i / 10 * W;
+    ctx.beginPath(); ctx.moveTo(p, 0); ctx.lineTo(p, H); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, p); ctx.lineTo(W, p); ctx.stroke();
+  }
+
+  // Edificios: activos rellenos, inactivos punteados y tenues
+  f0.edificios.forEach(e => {
+    const x = escalar(e.x), y = escalar(e.y);
+    let color = getCss('--free');
+    if (e.dueño === 'equipo_A') color = getCss('--team-a');
+    if (e.dueño === 'equipo_B') color = getCss('--team-b');
+
+    ctx.beginPath();
+    ctx.arc(x, y, 10, 0, Math.PI * 2);
+    if (e.activo) {
+      ctx.fillStyle = color;
+      ctx.globalAlpha = 0.85;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.setLineDash([]);
+      ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+      ctx.stroke();
+    } else {
+      ctx.setLineDash([3, 3]);
+      ctx.strokeStyle = 'rgba(124,138,153,0.5)';
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    ctx.fillStyle = e.activo ? 'rgba(215,222,230,0.55)' : 'rgba(124,138,153,0.4)';
+    ctx.font = '9px sans-serif';
+    ctx.textAlign = 'center';
+    let nombre = e.nombre.replace('tienda de curacion', 'curacion').replace('taller de alquimia', 'alquimia');
+    ctx.fillText(nombre, x, y - 14);
+  });
+
+  // Jugadores (bases): cuadraditos, interpolados salvo teletransporte
+  const pos1J = {};
+  f1.jugadores_pos.forEach(j => pos1J[j.nombre] = j);
+  f0.jugadores_pos.forEach(j => {
+    const jn = pos1J[j.nombre] || j;
+    let jx = j.x, jy = j.y;
+    const salto = Math.hypot(jn.x - j.x, jn.y - j.y);
+    if (salto < 30) { jx = lerp(j.x, jn.x, t); jy = lerp(j.y, jn.y, t); }
+    else if (t > 0.5) { jx = jn.x; jy = jn.y; }
+    const x = escalar(jx), y = escalar(jy);
+    ctx.beginPath();
+    ctx.rect(x - 4, y - 4, 8, 8);
+    ctx.fillStyle = colorEquipo(j.equipo);
+    ctx.globalAlpha = 0.9;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  });
+
+  // Escuadrones: interpolados; los apilados en el mismo punto se separan
+  // visualmente en un pequeno circulo para poder distinguirlos
+  const pos1E = {};
+  f1.escuadrones.forEach((e, i) => pos1E[e.jugador + '_' + i] = e);
+  const dibujados = {};
+  f0.escuadrones.forEach((e, i) => {
+    const en = pos1E[e.jugador + '_' + i] || e;
+    let ex = e.x, ey = e.y;
+    const salto = Math.hypot(en.x - e.x, en.y - e.y);
+    if (salto < 30) { ex = lerp(e.x, en.x, t); ey = lerp(e.y, en.y, t); }
+    else if (t > 0.5) { ex = en.x; ey = en.y; }
+
+    // separacion visual de apilados
+    const clave = Math.round(ex) + ',' + Math.round(ey);
+    const n = dibujados[clave] || 0;
+    dibujados[clave] = n + 1;
+    const offx = n > 0 ? 6 * Math.cos(n * 2.1) : 0;
+    const offy = n > 0 ? 6 * Math.sin(n * 2.1) : 0;
+
+    const x = escalar(ex) + offx, y = escalar(ey) + offy;
+    ctx.beginPath();
+    ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = colorEquipo(e.equipo);
+    ctx.fill();
+  });
+
+  const mins = String(f0.minuto).padStart(2, '0');
+  const segs = String(Math.max(0, f0.tick) % 60).padStart(2, '0');
+  document.getElementById('reloj').textContent = mins + ':' + segs;
+  document.getElementById('pa').textContent = f0.puntos_A.toLocaleString();
+  document.getElementById('pb').textContent = f0.puntos_B.toLocaleString();
+  document.getElementById('slider').value = Math.floor(idx);
+}
+
+let cursor = 0;          // posicion continua entre frames
+let reproduciendo = false;
+let ultimoTiempo = null;
+
+const slider = document.getElementById('slider');
+slider.max = replay.length - 1;
+
+function loop(ahora) {
+  if (!reproduciendo) return;
+  if (ultimoTiempo === null) ultimoTiempo = ahora;
+  const dt = (ahora - ultimoTiempo) / 1000;
+  ultimoTiempo = ahora;
+
+  const velocidad = parseFloat(document.getElementById('velocidad').value);
+  // cada frame de replay representa `intervalo` seg de juego; avanzamos
+  // en "frames por segundo real" segun la velocidad elegida
+  cursor += dt * velocidad;
+  if (cursor >= replay.length - 1) { cursor = replay.length - 1; pause(); }
+
+  dibujar(Math.floor(cursor), cursor - Math.floor(cursor));
+  requestAnimationFrame(loop);
+}
+
+function play() {
+  reproduciendo = true;
+  ultimoTiempo = null;
+  document.getElementById('btnPlay').textContent = 'Pausar';
+  requestAnimationFrame(loop);
+}
+function pause() {
+  reproduciendo = false;
+  document.getElementById('btnPlay').textContent = 'Reproducir';
+}
+
+document.getElementById('btnPlay').addEventListener('click', () => {
+  if (reproduciendo) pause(); else play();
+});
+slider.addEventListener('input', () => {
+  pause();
+  cursor = parseInt(slider.value);
+  dibujar(cursor, 0);
+});
+
+dibujar(0, 0);
+</script>
+</body>
+</html>
+"""
 
 # ============================================================
 # CONSTANTES GLOBALES
@@ -493,6 +750,78 @@ def decidir_accion_genoma(jugador, mapa, todos_los_jugadores):
                 escuadron.enviar_a_atacar_jugador(mejor_opcion)
 
 
+UMBRAL_TELETRANSPORTE = 200  # solo se teletransporta si el objetivo está más lejos que esto
+
+
+SEPARACION_MINIMA = 10  # nadie puede pararse a menos de esto de otro jugador/edificio
+
+
+def posicion_libre_cercana(x, y, mapa, todos_los_jugadores):
+    """
+    Busca la posición libre más cercana a (x, y) respetando la separación
+    mínima con todos los edificios y jugadores. Prueba en anillos cada vez
+    más amplios alrededor del punto deseado.
+    """
+    ocupados = [(e.x, e.y) for e in mapa] + [(j.x, j.y) for j in todos_los_jugadores]
+
+    def esta_libre(px, py):
+        for ox, oy in ocupados:
+            if distancia((px, py), (ox, oy)) < SEPARACION_MINIMA:
+                return False
+        return True
+
+    if esta_libre(x, y):
+        return max(0, min(1000, x)), max(0, min(1000, y))
+
+    # Buscar en anillos alrededor: radio 15, 30, 45... y 8 direcciones por anillo
+    for radio in range(15, 200, 15):
+        for angulo_paso in range(8):
+            angulo = angulo_paso * (math.pi / 4)
+            px = x + radio * math.cos(angulo)
+            py = y + radio * math.sin(angulo)
+            px = max(0, min(1000, px))
+            py = max(0, min(1000, py))
+            if esta_libre(px, py):
+                return px, py
+
+    return max(0, min(1000, x)), max(0, min(1000, y))  # último recurso
+
+
+def decidir_teletransporte(jugador, mapa, todos_los_jugadores):
+    """
+    Si el jugador no está en cooldown y tiene escuadrones libres en base,
+    revisa si el mejor objetivo disponible está lejos -- si es así, se
+    teletransporta cerca de él para que sus escuadrones lleguen más rápido.
+    """
+    if jugador.cooldown_teletransporte_restante > 0:
+        return
+
+    escuadrones_en_base = [e for e in jugador.escuadrones() if e.estado == "en_base"]
+    if not escuadrones_en_base:
+        return  # todos ocupados, no hace falta reposicionarse
+
+    referencia = escuadrones_en_base[0]
+    mejor_obj = None
+    mejor_score = None
+    for edificio in mapa:
+        if edificio.dueño is None:
+            asignados = contar_escuadrones_asignados(edificio, jugador.equipo, todos_los_jugadores)
+            if asignados >= MAX_ESCUADRONES_POR_EDIFICIO:
+                continue
+            score = puntaje_edificio(referencia, jugador, edificio, todos_los_jugadores)
+            if mejor_score is None or score > mejor_score:
+                mejor_score = score
+                mejor_obj = edificio
+
+    if mejor_obj is None:
+        return
+
+    dist_actual = distancia((jugador.x, jugador.y), (mejor_obj.x, mejor_obj.y))
+    if dist_actual > UMBRAL_TELETRANSPORTE:
+        nueva_x, nueva_y = posicion_libre_cercana(mejor_obj.x, mejor_obj.y, mapa, todos_los_jugadores)
+        jugador.teletransportarse(nueva_x, nueva_y, mapa)
+
+
 # ============================================================
 # AGENTE TONTO -- se deja como referencia / comparación
 # ============================================================
@@ -606,6 +935,32 @@ def decidir_accion_agente_tonto(jugador, mapa, todos_los_jugadores):
 # BUCLE PRINCIPAL DE SIMULACIÓN
 # ============================================================
 
+def _foto_del_estado(tick, minuto_actual, puntos_A, puntos_B, mapa, jugadores):
+    return {
+        "tick": tick,
+        "minuto": minuto_actual,
+        "puntos_A": round(puntos_A),
+        "puntos_B": round(puntos_B),
+        "edificios": [
+            {"nombre": e.nombre, "x": e.x, "y": e.y, "dueño": e.dueño,
+             "activo": e.minuto_aparicion <= minuto_actual}
+            for e in mapa
+        ],
+        "escuadrones": [
+            {"jugador": j.nombre, "equipo": j.equipo, "x": round(esc.x, 1),
+             "y": round(esc.y, 1), "estado": esc.estado,
+             "soldados": esc.soldados_actuales}
+            for j in jugadores for esc in j.escuadrones()
+            if esc.estado != "en_base"
+        ],
+        "jugadores_pos": [
+            {"nombre": j.nombre, "equipo": j.equipo, "x": round(j.x, 1),
+             "y": round(j.y, 1), "hits": j.hits}
+            for j in jugadores
+        ],
+    }
+
+
 def simular_partida_con_replay(jugadores, duracion_segundos=DURACION_PARTIDA_SEGUNDOS,
                                 usar_genoma=True, intervalo_grabacion=5):
     """
@@ -618,7 +973,8 @@ def simular_partida_con_replay(jugadores, duracion_segundos=DURACION_PARTIDA_SEG
     puntos_equipo_B = 0
     decidir_accion = decidir_accion_genoma if usar_genoma else decidir_accion_agente_tonto
 
-    replay = []
+    # Foto del estado inicial (todos en su spawn, antes de cualquier decisión)
+    replay = [_foto_del_estado(-1, 0, 0, 0, mapa, jugadores)]
 
     for tick in range(duracion_segundos):
         minuto_actual = tick // 60
@@ -634,6 +990,9 @@ def simular_partida_con_replay(jugadores, duracion_segundos=DURACION_PARTIDA_SEG
             jugador.actualizar_cooldown()
 
         for jugador in jugadores:
+            decidir_teletransporte(jugador, mapa, jugadores)
+
+        for jugador in jugadores:
             decidir_accion(jugador, mapa, jugadores)
 
         mapa_activo = [e for e in mapa if e.minuto_aparicion <= minuto_actual]
@@ -642,29 +1001,8 @@ def simular_partida_con_replay(jugadores, duracion_segundos=DURACION_PARTIDA_SEG
         sumar_puntos_personales(mapa_activo, jugadores)
 
         if tick % intervalo_grabacion == 0:
-            foto = {
-                "tick": tick,
-                "minuto": minuto_actual,
-                "puntos_A": round(puntos_equipo_A),
-                "puntos_B": round(puntos_equipo_B),
-                "edificios": [
-                    {"nombre": e.nombre, "x": e.x, "y": e.y, "dueño": e.dueño,
-                     "activo": e.minuto_aparicion <= minuto_actual}
-                    for e in mapa
-                ],
-                "escuadrones": [
-                    {"jugador": j.nombre, "equipo": j.equipo, "x": round(esc.x, 1),
-                     "y": round(esc.y, 1), "estado": esc.estado,
-                     "soldados": esc.soldados_actuales}
-                    for j in jugadores for esc in j.escuadrones()
-                    if esc.estado != "en_base"
-                ],
-                "jugadores_pos": [
-                    {"nombre": j.nombre, "equipo": j.equipo, "x": j.x, "y": j.y, "hits": j.hits}
-                    for j in jugadores
-                ],
-            }
-            replay.append(foto)
+            replay.append(_foto_del_estado(tick, minuto_actual, puntos_equipo_A,
+                                            puntos_equipo_B, mapa, jugadores))
 
     return {
         "puntos_equipo_A": puntos_equipo_A,
@@ -736,6 +1074,9 @@ def simular_partida_con_jugadores(jugadores, duracion_segundos=DURACION_PARTIDA_
 
         for jugador in jugadores:
             jugador.actualizar_cooldown()
+
+        for jugador in jugadores:
+            decidir_teletransporte(jugador, mapa, jugadores)
 
         for jugador in jugadores:
             decidir_accion(jugador, mapa, jugadores)
@@ -899,15 +1240,63 @@ def evolucionar(tamano_poblacion=80, jugadores_por_equipo=5, max_generaciones=20
         poblacion = crear_siguiente_generacion(resultados, tamano_poblacion)
 
     mejor_genoma = max(resultados, key=lambda par: par[1])[0]
-    return {"poblacion_final": poblacion, "mejor_genoma": mejor_genoma, "historial": historial}
+    return {
+        "poblacion_final": poblacion,
+        "mejor_genoma": mejor_genoma,
+        "historial": historial,
+        "ultimos_resultados": resultados,  # (genoma, fitness) de la última generación evaluada
+    }
+
+
+def jugar_gran_final(ultimos_resultados, jugadores_por_equipo=5, intervalo_grabacion=5, verbose=True):
+    """
+    Toma los 2 mejores genomas de la última generación evaluada y los
+    enfrenta en una partida dedicada (cada equipo lleno de copias de
+    "su" mejor genoma). Devuelve el resultado + el replay para visualizar.
+    """
+    ordenados = sorted(ultimos_resultados, key=lambda par: par[1], reverse=True)
+    genoma_1 = ordenados[0][0]
+    genoma_2 = ordenados[1][0]
+
+    genomas_A = [genoma_1] * jugadores_por_equipo
+    genomas_B = [genoma_2] * jugadores_por_equipo
+
+    jugadores = crear_jugadores_con_genomas(genomas_A, genomas_B)
+    resultado = simular_partida_con_replay(jugadores, usar_genoma=True,
+                                            intervalo_grabacion=intervalo_grabacion)
+
+    if verbose:
+        print(f"GRAN FINAL -- genoma #1 (equipo_A) vs genoma #2 (equipo_B)")
+        print(f"  genoma #1: {[round(g, 3) for g in genoma_1]}")
+        print(f"  genoma #2: {[round(g, 3) for g in genoma_2]}")
+        print(f"  Resultado: A={resultado['puntos_equipo_A']:.0f}  B={resultado['puntos_equipo_B']:.0f}")
+
+    resultado["genoma_1"] = genoma_1
+    resultado["genoma_2"] = genoma_2
+    return resultado
+
+
+def generar_replay_html(replay, ruta_salida):
+    """
+    Toma la lista `replay` (de simular_partida_con_replay) y genera un
+    archivo HTML autocontenido con el visualizador de time-lapse, listo
+    para abrir en el navegador.
+    """
+    import json
+
+    replay_json = json.dumps(replay)
+
+    plantilla = _PLANTILLA_HTML_REPLAY.replace("REPLAY_DATA_PLACEHOLDER", replay_json)
+
+    with open(ruta_salida, "w") as f:
+        f.write(plantilla)
+
+    return ruta_salida
 
 
 if __name__ == "__main__":
-    resultado = evolucionar(
-        tamano_poblacion=100,      # ajustable
-        jugadores_por_equipo=11,   # ajustable (5-20, como el juego real)
-        max_generaciones=200,
-        generaciones_sin_mejora_limite=15,
-        verbose=True
-)
-    print(resultado["mejor_genoma"])
+    resultado = simular_partida(cantidad_por_equipo=5, usar_genoma=False, verbose=True)
+    print()
+    print("=== RESULTADO (agente tonto, prueba rápida) ===")
+    print("Equipo A:", resultado["puntos_equipo_A"])
+    print("Equipo B:", resultado["puntos_equipo_B"])
