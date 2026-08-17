@@ -1,0 +1,351 @@
+# Simulación evolutiva de "Elixir Scramble" (Last Asylum: Plague)
+
+Documentación de contexto del proyecto: qué es, qué mecánicas del juego real
+se modelaron, cómo está construido el código, qué está implementado, y qué
+falta. Pensado para pegarse como contexto en Claude Code / VSCode al
+continuar el trabajo.
+
+**Archivo principal:** `paso3_motor_simulacion.py` (un solo archivo, ~2300 líneas)
+
+---
+
+## 1. Qué es el proyecto
+
+Simulación de **Elixir Scramble** ("Batalla de Elixir"), un evento de
+alianza-vs-alianza del juego *Last Asylum: Plague*, de 30 minutos de
+duración. El objetivo del proyecto es:
+
+1. Modelar el evento con la mayor fidelidad posible al juego real (mapa,
+   edificios, combate, movimiento, jugadores).
+2. Usar un **algoritmo genético** para evolucionar el comportamiento de los
+   jugadores (representado como un genoma de 4 pesos) y descubrir qué
+   estrategias emergen solas, sin programarlas a mano.
+3. Poder **ver** las partidas resultantes como un time-lapse visual (HTML).
+
+La filosofía del proyecto, repetida varias veces durante el desarrollo: el
+entorno y las reglas se construyen fieles al juego real, y la estrategia
+**emerge** de la evolución — no se le dice al agente qué hacer, se le da un
+mundo con las reglas correctas y se deja que descubra qué funciona.
+
+---
+
+## 2. Mecánicas del juego real (recopiladas durante el desarrollo)
+
+### 2.1 Estructura general del evento
+- Dura 30 minutos, alianza vs alianza.
+- Los puntos vienen de 3 fuentes: mantener edificios, recolectar en
+  campamentos, y matar jugadores enemigos ("Doctores").
+- Los puntos de edificios se generan **continuamente** mientras están bajo
+  tu control (tasa por segundo), no como un valor fijo por captura.
+
+### 2.2 Edificios (con datos reales del juego)
+
+| Edificio | Alianza/seg | Personal/seg | Efecto especial | Aparece (min) |
+|---|---|---|---|---|
+| Tienda de Curación (x4) | 30 | 30 | Regenera soldados perdidos | 0 |
+| Taller de Alquimia (x2) | 50 | 30 | Ninguno | 0 |
+| Observatorio | 10 | 30 | +10% a los puntos de alianza de todos los edificios del equipo | 0 |
+| Portal de Migración | 10 | 30 | -50% cooldown de teletransporte | 0 |
+| Altar Maldito | 10 | 30 | -15% ATK/DEF/HP a los enemigos | 10 |
+| Reliquias de Guerra | 10 | 30 | +15% ATK/DEF/HP a los aliados | 10 |
+| Castillo de Elixir | 80 | 30 | Ninguno (el más valioso en puntos puros) | 10 |
+| Campamentos | 5 | 5 | Ninguno (sí se puede mandar +1 escuadrón del mismo jugador) | 13 |
+
+**Importante:** un edificio con varios defensores da su tasa de alianza **una
+sola vez** al equipo (no se multiplica por cantidad de defensores). Los
+puntos *personales* sí los gana cada defensor individualmente, sin dividir.
+
+### 2.3 Jugadores
+- Cada jugador tiene **4 hits** (vidas). Al llegar a 0, revive en el spawn
+  de su equipo, con los hits reseteados a 4. Las revividas son infinitas.
+- **Al morir, TODOS sus escuadrones se van con él de forma instantánea**,
+  sin importar qué estuvieran haciendo (incluso si estaban defendiendo
+  exitosamente un edificio lejano). Esto es una mecánica de "bola de nieve"
+  importante: matar a un jugador puede desmoronar sus defensas en cualquier
+  parte del mapa.
+- **Teletransporte**: el jugador (su posición base) se mueve por
+  teletransporte instantáneo, con cooldown de 120 segundos (60 con el
+  Portal de Migración). Al teletransportarse, arrastra a sus 3 escuadrones
+  con él, sin importar su estado — incluso si se está regresando de una
+  derrota (y se rellena de inmediato al llegar).
+- **Las tropas que atacan sí caminan** con tiempo de viaje real — solo la
+  posición base del jugador se teletransporta, no los escuadrones en
+  movimiento hacia un objetivo.
+- Total de soldados: aleatorio entre 18,462 y 26,000.
+- Tier según soldados totales: T7 (<21,962, 915 poder/soldado), T8
+  (21,962-25,462, 1100), T9 (>25,462, 1350).
+- 3 escuadrones de ataque por jugador, con capacidad como % del total (con
+  variación aleatoria de ±3%): ~13.4%, ~9.5%, ~8.0%.
+
+### 2.4 Combate
+- Probabilidad logística: `P(A gana) = 1 / (1 + e^(-k*(poder_a-poder_b)/1e6))`,
+  con `k=1.5` calibrado para el rango real de poder (4M-14M, diferencias
+  de hasta ~10M casi siempre decisivas).
+- El **ganador conserva la mitad de sus propios soldados** (no la
+  diferencia de poder); el perdedor queda en 0.
+- Puntos por matar: el ganador gana los puntos completos del combate
+  (poder eliminado / escala); el perdedor gana la mitad.
+- Con varios defensores: en un ataque **solitario**, el atacante los
+  enfrenta en secuencia con el poder que le va quedando. En un ataque de
+  **rally** (grupo sincronizado), se combina el poder de todo el grupo
+  contra el poder combinado de todos los defensores en una sola batalla.
+- Un jugador solo puede mandar **un escuadrón por objetivo** (edificio o
+  jugador enemigo) — excepto a los campamentos, donde puede mandar varios.
+- Máximo **6 escuadrones** pueden defender o atacar juntos un mismo
+  objetivo (límite real del juego, igual al tamaño máximo de un rally).
+
+### 2.5 Rally (ataque conjunto sincronizado)
+- Un jugador abre un punto de reunión hacia un objetivo (edificio enemigo
+  defendido, o jugador enemigo).
+- Otros jugadores del equipo pueden sumarse durante 1 minuto (o hasta
+  llenar el cupo de 6).
+- Al cumplirse el plazo o el cupo, **todos salen juntos** desde la
+  posición del líder, y llegan exactamente al mismo tick.
+- Contra un jugador: el golpe combinado aplica varios hits a la vez —
+  puede dejarlo fuera de combate de un solo golpe en vez de necesitar
+  varios ataques espaciados en el tiempo (que le darían tiempo a
+  reaccionar).
+
+### 2.6 Reglas de posicionamiento
+- Nadie puede pararse encima de otro jugador o edificio — se desplaza a la
+  posición libre más cercana.
+- Un edificio que aún no está desbloqueado no se puede "esperar al lado" —
+  si un escuadrón llega ahí, se regresa a base.
+
+---
+
+## 3. Arquitectura del código
+
+Todo vive en un único archivo Python (`paso3_motor_simulacion.py`),
+organizado en bloques:
+
+```
+PARÁMETROS            <- todo lo ajustable, en un solo lugar (ver sección 4)
+MAPA                  <- clase Edificio, crear_mapa(), cálculo de puntos
+COMBATE                <- probabilidad logística, resolver_combate()
+ESCUADRON              <- clase Escuadron (movimiento, estados, rally)
+RALLY                  <- clase Rally, gestionar_rallies()
+JUGADOR                <- clase Jugador (soldados, tier, teletransporte, muerte)
+DETECCIÓN Y RESOLUCIÓN <- resolver_llegada_a_edificio/jugador, versiones grupales
+AGENTE EVOLUTIVO        <- decidir_accion_genoma(), puntajes, decidir_teletransporte()
+AGENTE TONTO            <- decidir_accion_agente_tonto() (referencia/comparación)
+BUCLE PRINCIPAL         <- simular_partida_con_jugadores/con_replay()
+ALGORITMO GENÉTICO      <- evolucionar(), ejecutar_torneo(), cruce/mutación
+GRAN FINAL / PLAYOFF     <- jugar_gran_final(), jugar_batalla()
+SALÓN DE LA FAMA         <- actualizar_salon_fama(), top 3 histórico
+DUELO PERSONALIZADO      <- jugar_duelo_personalizado()
+HERRAMIENTAS DE ANÁLISIS <- analizar_sensibilidad(), evaluar_robustez()
+VISUALIZACIÓN HTML       <- generar_replay_html(), generar_replay_html_multiple()
+__main__                <- flujo completo configurable
+```
+
+### El genoma: `[w1, w2, w3, w4]`
+Cada jugador tiene 4 pesos que definen su estrategia. El score de cualquier
+opción (edificio o jugador enemigo) se calcula como:
+
+```
+score = w1*valor_puntos + w2*cercania + w3*poder_relativo + w4*aliados_ya_asignados
+```
+
+- `w1`: qué tanto valora los puntos que da un edificio.
+- `w2`: qué tanto valora la cercanía (menos viaje).
+- `w3`: agresividad — positivo = ataca con ventaja, negativo = evita el
+  combate. También gobierna si decide recapturar edificios enemigos.
+- `w4`: coordinación — positivo = prefiere agruparse (usa rally contra
+  jugadores), negativo = prefiere repartirse.
+
+---
+
+## 4. Bloque de parámetros (todo ajustable en un solo lugar)
+
+Al inicio del archivo, sección `# PARÁMETROS`. Categorías:
+
+- **Movimiento y mapa**: velocidad de tropas, cooldown de teletransporte,
+  umbral de teletransporte, separación mínima, límite de escuadrones por
+  edificio.
+- **Combate**: `K_COMBATE`, `FRACCION_SOLDADOS_SOBREVIVIENTES`,
+  `FRACCION_PUNTOS_PERDEDOR`.
+- **Puntuación**: `ESCALA_PUNTOS_KILL`, `PUNTOS_POR_HIT`,
+  `PUNTOS_POR_MUERTE` (⚠️ estos 3 son valores calibrados a ojo, no hay
+  dato real del juego — ajustar cuando se consiga), `BONO_VICTORIA`.
+- **Duración y mapa**: duración de partida, `SPAWN_EQUIPO_A/B` (ya
+  colocados en los costados: `(0,500)` y `(1000,500)`).
+- **Algoritmo genético**: `RUIDO_MUTACION`, `CANTIDAD_ELITE`,
+  `FRACCION_POOL_PADRES`.
+- **Curación**: `SOLDADOS_CURADOS_POR_TICK=15`,
+  `INTERVALO_CURACION_SEGUNDOS=10`.
+- **Rally**: `DURACION_RALLY_SEGUNDOS=60`, `CAPACIDAD_RALLY=6`.
+- **Teletransporte inteligente**: `CANTIDAD_OBJETIVOS_TELEPORT=3`.
+- **Salón de la fama**: `TAMANO_SALON_FAMA=3`.
+
+---
+
+## 5. Algoritmo genético: decisiones de diseño y por qué
+
+- **Fitness** = `puntos_personales` + `BONO_VICTORIA` (1,000,000) si el
+  equipo ganó. El bono domina a propósito: "lo más importante es que gane
+  el equipo", los puntos personales solo desempatan dentro del mismo
+  equipo.
+- **Criterio de parada por PROMEDIO, no por "mejor"**: se detectó que el
+  fitness "mejor" toca techo casi de inmediato (el bono + un máximo
+  natural de puntos personales alcanzable por azar desde la generación 0),
+  así que no sirve para medir aprendizaje real. El promedio de toda la
+  población sí refleja mejora genuina.
+- **Varias partidas por genoma por generación** (`partidas_por_genoma`):
+  cada genoma juega varias partidas con compañeros/rivales distintos, y su
+  fitness es el promedio — reduce el ruido de "tuve suerte con mis
+  compañeros".
+- **Playoff después de evolucionar**: se detectó que el ranking por
+  fitness del torneo NO identifica de forma confiable a los genomas
+  realmente más fuertes (un genoma puede quedar "primero" por fitness y
+  perder 7 de 7 partidas reales contra otros candidatos). Por eso, antes
+  de la Gran Final, se toman los top N candidatos por fitness y se
+  enfrentan **todos contra todos con equipos de clones** (elimina la
+  suerte de compañeros) — el campeón real es el de más victorias en ese
+  playoff.
+- **Efecto "Reina Roja"**: el fitness promedio se estanca aunque la
+  población siga mejorando, porque todos mejoran al mismo ritmo y las
+  posiciones relativas no cambian. Por eso se agregó la batalla contra el
+  "mejor genoma de la generación 0" — mide progreso absoluto, no relativo.
+
+---
+
+## 6. Lo que está implementado (y verificado con pruebas)
+
+- Mapa completo con los 13 edificios reales, fases de desbloqueo.
+- Movimiento con tiempo de viaje real (línea recta) + teletransporte
+  instantáneo con cooldown.
+- Combate 1v1 y secuencial (varios defensores, ataque solitario).
+- **Rally**: ataque conjunto sincronizado, tanto contra edificios
+  defendidos como contra jugadores enemigos, con combate combinado.
+- Sistema de vidas/muerte con arrastre de escuadrones.
+- Curación real (regenera reserva, no escuadrones directamente).
+- Buffs/debuffs de Reliquias de Guerra y Altar Maldito aplicados al poder
+  de combate real (antes eran decorativos).
+- Multiplicador del Observatorio.
+- Reducción de cooldown del Portal de Migración.
+- El agente evalúa: edificios libres, edificios enemigos defendidos (con
+  rally), y jugadores enemigos (con rally si `w4>0`).
+- Algoritmo genético completo: selección, cruce, mutación, elitismo,
+  criterio de parada por promedio.
+- Playoff round-robin con clones para elegir finalistas reales.
+- Salón de la fama persistido en JSON, tope de 3 campeones históricos,
+  comparados por round-robin cada vez que hay un campeón nuevo.
+- Duelo personalizado: definir un genoma a mano (`MI_GENOMA`) y enfrentarlo
+  contra el campeón actual y el salón de la fama.
+- Herramientas de análisis: `analizar_sensibilidad()` (barrido de un
+  parámetro) y `evaluar_robustez()` (multi-semilla para un duelo
+  genoma-vs-genoma).
+- Visualizador HTML con time-lapse, interpolación de movimiento, anillo
+  visual de teletransporte, selector para ver varias batallas en un mismo
+  archivo.
+- Desglose de puntos por fuente (castillo / otros edificios / campamentos
+  / bono observatorio, y personal: defensa vs batallas) en la Gran Final.
+
+---
+
+## 7. Pendiente / limitaciones conocidas
+
+- **`PUNTOS_POR_HIT`, `PUNTOS_POR_MUERTE`, `ESCALA_PUNTOS_KILL` son
+  valores inventados** — no hay dato real del juego de cuánto vale matar
+  a un jugador o a soldados. Prioridad si se consigue el dato real.
+- **No se ha vuelto a correr una evolución larga desde que se agregó el
+  rally** — las estrategias observadas hasta ahora (economía pura,
+  evitar combate) son de *antes* de esta herramienta. Vale la pena
+  evolucionar de nuevo y ver si cambia el balance agresión/economía.
+- **`Jugador.esta_eliminado()` está definida pero nunca se usa** — no hay
+  ninguna consecuencia en la simulación cuando un jugador se queda sin
+  soldados en absoluto (reserva y escuadrones en 0). Decidir si debería
+  pasar algo (quedar fuera del resto de la partida, por ejemplo).
+- **Las herramientas de sensibilidad/robustez están construidas pero no
+  se han usado todavía** para calibrar nada en serio — es el siguiente
+  paso natural antes de confiar en resultados específicos.
+- **No se ha corrido robustez multi-semilla de una EVOLUCIÓN completa**
+  (solo existe para duelos genoma-vs-genoma) — no se sabe si la misma
+  estrategia emerge de forma consistente entre corridas completas
+  distintas, o si cada corrida da algo distinto.
+- **Movimiento en línea recta**, sin obstáculos ni pathing.
+- **Solo 2 campamentos fijos** (700,700) y (300,300) — el juego real
+  describe "numerosos" campamentos; se simplificó a propósito, pendiente
+  decidir si vale la pena tener más o aleatorios.
+- **Sin cooldown de rally**: un jugador puede abrir/unirse a rallies sin
+  ninguna restricción de frecuencia (no se investigó si el juego real
+  tiene algún límite ahí).
+- **Un escuadrón "esperando_rally" no puede reconsiderar** si aparece una
+  oportunidad mejor mientras espera — queda comprometido hasta que el
+  rally parte o el jugador se teletransporta (lo cual lo saca del rally).
+- **No hay dato real confirmado de si hay límite de frecuencia para
+  usar rally**, ni de la duración exacta de la ventana en el juego real
+  más allá de lo que el usuario recordaba (~1 minuto).
+
+---
+
+## 8. Cómo correr el proyecto
+
+Todo el flujo completo (evolución → playoff → gran final → salón de la
+fama → HTML) está en el `if __name__ == "__main__":` al final del
+archivo. Los valores de configuración de la corrida (población, jugadores
+por equipo, generaciones, paciencia) están en variables al principio de
+ese bloque — se cambian ahí, no hace falta tocar el resto del código.
+
+Ejemplos de uso de piezas sueltas (para scripts propios):
+
+```python
+from paso3_motor_simulacion import *
+
+# Una partida cualquiera con replay
+jugadores = crear_jugadores(cantidad_por_equipo=5)
+resultado = simular_partida_con_replay(jugadores, usar_genoma=True)
+generar_replay_html(resultado["replay"], "mi_partida.html")
+
+# Evolución completa
+res = evolucionar(tamano_poblacion=80, jugadores_por_equipo=5, verbose=True)
+
+# Enfrentar dos genomas específicos
+resultado = jugar_batalla([0.5,0.4,-0.6,0.1], [0.8,0.2,0.5,0.5],
+                           jugadores_por_equipo=5, titulo="prueba")
+
+# Sensibilidad de un parámetro
+analizar_sensibilidad("ESCALA_PUNTOS_KILL", [5000, 10000, 20000, 40000],
+                       genoma_a, genoma_b, repeticiones=5)
+
+# Robustez de una ventaja observada
+evaluar_robustez(genoma_bueno, genoma_rival, n_semillas=10)
+```
+
+---
+
+## 9. Historial resumido de la conversación (contexto de decisiones)
+
+El proyecto se construyó de forma incremental, paso a paso, con este
+orden aproximado:
+
+1. Diseño conceptual: teoría de grafos → se descartó por espacio continuo.
+2. Mapa con edificios reales (investigados vía guías del juego).
+3. Función de combate (probabilidad logística), calibrada con casos a
+   mano usando el rango real de poder del juego (4M-14M).
+4. Clases `Escuadron` y `Jugador`, con soldados/tier/escuadrones.
+5. Motor de simulación completo (movimiento, combate, captura).
+6. Agente "tonto" (reglas fijas) para validar que el motor funciona antes
+   de meter evolución — encontró el problema de que todos convergían al
+   mismo edificio (llevó al límite de 6 por edificio).
+7. Fitness individual, algoritmo genético completo.
+8. Visualización HTML con time-lapse.
+9. Varias rondas de corrección de bugs y mecánicas encontradas al *ver*
+   las partidas simuladas (esto fue clave — varios problemas solo se
+   notaron mirando el replay, no los números):
+   - Teletransporte nunca se usaba (bug).
+   - Varios defensores de equipos distintos coexistiendo (bug de reglas).
+   - Esperar sobre edificios no desbloqueados (bug de reglas).
+   - Efectos de curación/buffs/debuffs completamente decorativos (nunca
+     conectados al motor).
+   - Agente nunca evaluaba recapturar edificios enemigos.
+   - Sin mecanismo de rally/ataque sincronizado.
+10. Herramientas de meta-análisis: playoff (el fitness del torneo no
+    identifica bien al más fuerte), salón de la fama histórico, duelo
+    personalizado, sensibilidad y robustez.
+
+Esta secuencia importa porque el patrón se repitió varias veces: **un
+bug o mecánica faltante no se nota en los números agregados, se nota
+viendo el replay**. Vale la pena seguir mirando partidas completas de vez
+en cuando, no solo los marcadores finales.

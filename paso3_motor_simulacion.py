@@ -303,6 +303,10 @@ UMBRAL_TELETRANSPORTE = 1         # distancia mínima al objetivo para que valga
 SEPARACION_MINIMA = 10            # nadie puede pararse a menos de esto de otro jugador/edificio
 MAX_ESCUADRONES_POR_EDIFICIO = 6  # límite de defensores Y de ataque conjunto por edificio/jugador
 
+# --- Rally (ataque conjunto sincronizado) ---
+DURACION_RALLY_SEGUNDOS = 60      # ventana para sumarse antes de que el grupo salga junto
+CAPACIDAD_RALLY = MAX_ESCUADRONES_POR_EDIFICIO  # mismo límite que defensa (6, incluye al líder)
+
 # --- Combate ---
 K_COMBATE = 1.5                         # agresividad de la curva de probabilidad (más alto = más determinista)
 FRACCION_SOLDADOS_SOBREVIVIENTES = 0.5  # qué % de sus soldados conserva el GANADOR de un combate
@@ -318,8 +322,8 @@ BONO_VICTORIA = 1_000_000         # bono de fitness por pertenecer al equipo gan
 
 # --- Duración y mapa ---
 DURACION_PARTIDA_SEGUNDOS = 1800  # 30 minutos
-SPAWN_EQUIPO_A = (500, 0)
-SPAWN_EQUIPO_B = (500, 1000)
+SPAWN_EQUIPO_A = (0, 500)
+SPAWN_EQUIPO_B = (1000, 500)
 
 # --- Algoritmo genético ---
 RUIDO_MUTACION = 0.05             # cuánto puede variar un gen al cruzar
@@ -453,6 +457,7 @@ class Escuadron:
         self.destino = None
         self.x = jugador_dueño.x
         self.y = jugador_dueño.y
+        self.rally = None  # objeto Rally al que pertenece, si está en uno
 
     def poder_actual(self):
         return self.poder_por_soldado * self.soldados_actuales
@@ -477,17 +482,34 @@ class Escuadron:
             self.y = self.y + VELOCIDAD_TROPAS * direccion_y
 
     def enviar_a_atacar(self, edificio_objetivo):
-        """Manda el escuadrón a capturar/defender un edificio."""
+        """Manda el escuadrón a capturar/defender un edificio, SOLO (sin rally)."""
+        self.salir_de_rally()
         self.destino = edificio_objetivo
         self.estado = "viajando_ataque"
 
     def enviar_a_atacar_jugador(self, jugador_objetivo):
         """Manda el escuadrón a atacar directamente a un jugador (Sistema 2)."""
+        self.salir_de_rally()
         self.destino = jugador_objetivo
         self.estado = "viajando_ataque_jugador"
 
+    def unirse_a_rally(self, rally):
+        """Se suma a un rally en formación -- espera a que el grupo salga junto."""
+        self.destino = rally.objetivo
+        self.estado = "esperando_rally"
+        self.rally = rally
+        rally.miembros.append(self)
+
+    def salir_de_rally(self):
+        """Se retira de cualquier rally al que perteneciera (si aplica)."""
+        if self.rally is not None:
+            if self in self.rally.miembros:
+                self.rally.miembros.remove(self)
+            self.rally = None
+
     def regresar_a_base(self):
         """El escuadrón perdió una pelea -- vuelve caminando a su jugador."""
+        self.salir_de_rally()
         self.destino = self.jugador_dueño
         self.estado = "regresando_base"
 
@@ -499,6 +521,7 @@ class Escuadron:
         la reserva del jugador permita -- igual que si hubiera
         llegado caminando a base.
         """
+        self.salir_de_rally()
         self.x = nueva_x
         self.y = nueva_y
         self.destino = None
@@ -516,6 +539,82 @@ class Escuadron:
         a_rellenar = min(faltantes, disponibles)
         self.soldados_actuales += a_rellenar
         jugador.total_soldados_reserva -= a_rellenar
+
+
+# ============================================================
+# RALLY (ataque conjunto sincronizado)
+# ============================================================
+
+class Rally:
+    """
+    Representa un punto de reunión abierto por un jugador hacia un
+    OBJETIVO (un Edificio enemigo defendido, o un Jugador enemigo).
+    Otros escuadrones del mismo equipo pueden sumarse durante
+    DURACION_RALLY_SEGUNDOS (o hasta llenar CAPACIDAD_RALLY). Cuando se
+    cumple el plazo o el cupo, todos los miembros parten JUNTOS desde
+    el mismo punto (la posición del líder en ese instante) hacia el
+    mismo objetivo -- como recorren la misma distancia a la misma
+    velocidad, llegan exactamente al mismo tick, y el ataque se
+    resuelve como un solo evento conjunto, no en cadena uno por uno.
+    """
+
+    def __init__(self, objetivo, equipo, tick_apertura, lider_escuadron):
+        self.objetivo = objetivo  # Edificio o Jugador
+        self.equipo = equipo
+        self.tick_apertura = tick_apertura
+        self.miembros = [lider_escuadron]
+        self.partido = False
+
+    def esta_lleno(self):
+        return len(self.miembros) >= CAPACIDAD_RALLY
+
+    def listo_para_partir(self, tick_actual):
+        return self.esta_lleno() or (tick_actual - self.tick_apertura) >= DURACION_RALLY_SEGUNDOS
+
+    def partir(self):
+        """Todos los miembros salen juntos desde la posición actual del líder."""
+        if not self.miembros:
+            self.partido = True
+            return
+        lider = self.miembros[0]
+        origen_x, origen_y = lider.x, lider.y
+        es_edificio = isinstance(self.objetivo, Edificio)
+        for esc in self.miembros:
+            esc.x = origen_x
+            esc.y = origen_y
+            esc.destino = self.objetivo
+            esc.estado = "viajando_ataque" if es_edificio else "viajando_ataque_jugador"
+            # esc.rally se conserva (no se limpia) para que procesar_llegadas
+            # los reconozca como grupo al llegar y los resuelva juntos
+        self.partido = True
+
+
+def gestionar_rallies(rallies, tick_actual):
+    """
+    Se llama una vez por tick. Revisa todos los rallies activos y hace
+    partir a los que ya cumplieron su ventana de tiempo o llenaron el
+    cupo. Elimina de la lista los que ya partieron o quedaron vacíos
+    (todos sus miembros se fueron por otra razón, ej. teletransporte).
+    """
+    for rally in rallies:
+        if rally.partido:
+            continue
+        if not rally.miembros:
+            rally.partido = True
+            continue
+        if rally.listo_para_partir(tick_actual):
+            rally.partir()
+
+    rallies[:] = [r for r in rallies if not r.partido]
+
+
+def buscar_rally_abierto(rallies, objetivo, equipo):
+    """Busca un rally del mismo equipo hacia el mismo objetivo que aún
+    no haya partido y tenga cupo. Retorna None si no existe."""
+    for r in rallies:
+        if not r.partido and r.objetivo is objetivo and r.equipo == equipo and not r.esta_lleno():
+            return r
+    return None
 
 
 # ============================================================
@@ -674,7 +773,32 @@ def buscar_defensor_en_edificio(edificio, equipo_atacante, todos_los_jugadores):
     return defensores[0] if defensores else None
 
 
-def resolver_llegada_a_edificio(escuadron_atacante, edificio, todos_los_jugadores, minuto_actual=None):
+def calcular_poder_combate(escuadron, mapa):
+    """
+    Poder de combate REAL de un escuadrón en este instante, incluyendo
+    los buffs/debuffs de los edificios especiales:
+    - Reliquias de Guerra: +valor_efecto al poder de los ALIADOS que
+      controlan el edificio (aplica a todo el equipo, no solo a quien
+      lo defiende).
+    - Altar Maldito: -valor_efecto al poder de los ENEMIGOS de quien
+      lo controla.
+    Ambos multiplicadores se acumulan sobre el poder base (soldados *
+    poder_por_soldado).
+    """
+    equipo = escuadron.jugador_dueño.equipo
+    equipo_enemigo = "equipo_B" if equipo == "equipo_A" else "equipo_A"
+    poder = escuadron.poder_actual()
+
+    for edificio in mapa:
+        if edificio.dueño == equipo and edificio.efecto_especial == "buff_aliados":
+            poder *= (1 + edificio.valor_efecto)
+        if edificio.dueño == equipo_enemigo and edificio.efecto_especial == "debuff_enemigos":
+            poder *= (1 - edificio.valor_efecto)
+
+    return poder
+
+
+def resolver_llegada_a_edificio(escuadron_atacante, edificio, todos_los_jugadores, mapa, minuto_actual=None):
     """
     Se llama cuando un escuadrón termina su viaje hacia un Edificio.
 
@@ -686,6 +810,9 @@ def resolver_llegada_a_edificio(escuadron_atacante, edificio, todos_los_jugadore
       SECUENCIA con el poder que le vaya quedando. Solo captura el
       edificio si elimina a todos; si pierde en cualquier pelea, se
       regresa. Nunca coexisten defensores de equipos distintos.
+
+    El poder usado en combate incluye los buffs/debuffs activos
+    (Reliquias de Guerra, Altar Maldito) -- ver calcular_poder_combate().
     """
     equipo_atacante = escuadron_atacante.jugador_dueño.equipo
 
@@ -705,8 +832,8 @@ def resolver_llegada_a_edificio(escuadron_atacante, edificio, todos_los_jugadore
 
     # Combates en secuencia contra cada defensor, con el poder restante
     for defensor in defensores:
-        poder_a = escuadron_atacante.poder_actual()
-        poder_b = defensor.poder_actual()
+        poder_a = calcular_poder_combate(escuadron_atacante, mapa)
+        poder_b = calcular_poder_combate(defensor, mapa)
 
         if poder_a <= 0:
             break  # ya no le queda nada con qué pelear
@@ -756,7 +883,7 @@ def resolver_llegada_a_jugador(escuadron_atacante, jugador_destino):
     """
     Se llama cuando un escuadrón termina su viaje hacia un Jugador.
     Puede ser: (a) está regresando a SU PROPIO jugador (relleno de base),
-    o (b) llegó a atacar a un jugador ENEMIGO (Sistema 2).
+    o (b) llegó a atacar a un jugador ENEMIGO (Sistema 2), en solitario.
     """
     equipo_atacante = escuadron_atacante.jugador_dueño.equipo
 
@@ -769,6 +896,119 @@ def resolver_llegada_a_jugador(escuadron_atacante, jugador_destino):
         # Es un jugador enemigo -> Sistema 2, ataque directo
         jugador_destino.recibir_ataque_directo(escuadron_atacante.jugador_dueño)
         escuadron_atacante.regresar_a_base()
+
+
+def resolver_llegada_grupal_edificio(escuadrones_grupo, edificio, todos_los_jugadores, mapa, minuto_actual=None):
+    """
+    Versión de resolver_llegada_a_edificio para un RALLY: varios
+    escuadrones llegan al mismo tick y pelean como UNA sola fuerza
+    combinada contra el poder combinado de todos los defensores,
+    en un único enfrentamiento (no en cadena uno por uno).
+    """
+    equipo_atacante = escuadrones_grupo[0].jugador_dueño.equipo
+    for esc in escuadrones_grupo:
+        esc.rally = None  # el rally ya cumplió su propósito
+
+    if minuto_actual is not None and edificio.minuto_aparicion > minuto_actual:
+        for esc in escuadrones_grupo:
+            esc.regresar_a_base()
+        return
+
+    defensores = buscar_defensores_en_edificio(edificio, equipo_atacante, todos_los_jugadores)
+
+    if not defensores:
+        # Nadie defendiendo -> captura automática, todo el grupo se queda
+        edificio.dueño = equipo_atacante
+        for esc in escuadrones_grupo:
+            esc.destino = edificio
+            esc.estado = "defendiendo"
+        return
+
+    poder_atacante_total = sum(calcular_poder_combate(e, mapa) for e in escuadrones_grupo)
+    poder_defensor_total = sum(calcular_poder_combate(d, mapa) for d in defensores)
+
+    ganador = resolver_combate(poder_atacante_total, poder_defensor_total)
+    poder_eliminado = min(poder_atacante_total, poder_defensor_total)
+    puntos_combate_total = poder_eliminado / ESCALA_PUNTOS_KILL
+
+    if ganador == "A":
+        # Gana el grupo atacante: cada defensor cae; cada atacante conserva
+        # una fracción de SUS PROPIOS soldados (misma regla que 1 vs 1,
+        # aplicada individualmente a cada miembro del grupo)
+        parte_ganador = puntos_combate_total / len(escuadrones_grupo)
+        parte_perdedor = (puntos_combate_total * FRACCION_PUNTOS_PERDEDOR) / len(defensores)
+
+        for esc in escuadrones_grupo:
+            esc.jugador_dueño.puntos_personales += parte_ganador
+            esc.jugador_dueño.puntos_por_kills += parte_ganador
+            esc.soldados_actuales = round(esc.soldados_actuales * FRACCION_SOLDADOS_SOBREVIVIENTES)
+            esc.destino = edificio
+            esc.estado = "defendiendo"
+
+        for d in defensores:
+            d.jugador_dueño.puntos_personales += parte_perdedor
+            d.jugador_dueño.puntos_por_kills += parte_perdedor
+            d.soldados_actuales = 0
+            d.regresar_a_base()
+
+        edificio.dueño = equipo_atacante
+    else:
+        # Gana el grupo defensor: cada atacante cae; cada defensor
+        # conserva una fracción de sus propios soldados
+        parte_ganador = puntos_combate_total / len(defensores)
+        parte_perdedor = (puntos_combate_total * FRACCION_PUNTOS_PERDEDOR) / len(escuadrones_grupo)
+
+        for d in defensores:
+            d.jugador_dueño.puntos_personales += parte_ganador
+            d.jugador_dueño.puntos_por_kills += parte_ganador
+            d.soldados_actuales = round(d.soldados_actuales * FRACCION_SOLDADOS_SOBREVIVIENTES)
+
+        for esc in escuadrones_grupo:
+            esc.jugador_dueño.puntos_personales += parte_perdedor
+            esc.jugador_dueño.puntos_por_kills += parte_perdedor
+            esc.soldados_actuales = 0
+            esc.regresar_a_base()
+        # el edificio se queda como estaba
+
+
+def resolver_llegada_grupal_jugador(escuadrones_grupo, jugador_destino):
+    """
+    Versión de resolver_llegada_a_jugador para un RALLY: varios
+    escuadrones llegan al mismo tick contra el mismo jugador enemigo.
+    Como el Sistema 2 no usa poder (siempre resta 1 hit por escuadrón
+    que llega), la ventaja real de agrupar aquí es la VELOCIDAD: si el
+    grupo trae más hits de los que le quedan al jugador, cae en un solo
+    golpe combinado en vez de necesitar varias oleadas espaciadas en el
+    tiempo -- reduciendo su chance de escapar o reforzarse entre ataques.
+    """
+    equipo_atacante = escuadrones_grupo[0].jugador_dueño.equipo
+
+    if jugador_destino.equipo == equipo_atacante:
+        # No debería pasar (los rallies solo se abren contra enemigos),
+        # pero por seguridad: cada uno vuelve y se rellena individualmente
+        for esc in escuadrones_grupo:
+            esc.estado = "en_base"
+            esc.destino = None
+            esc.rellenar_desde_reserva()
+        return
+
+    total_hits_grupo = len(escuadrones_grupo)
+
+    for esc in escuadrones_grupo:
+        esc.jugador_dueño.puntos_personales += PUNTOS_POR_HIT
+        esc.jugador_dueño.puntos_por_kills += PUNTOS_POR_HIT
+
+    if total_hits_grupo >= jugador_destino.hits:
+        bono_repartido = PUNTOS_POR_MUERTE / len(escuadrones_grupo)
+        for esc in escuadrones_grupo:
+            esc.jugador_dueño.puntos_personales += bono_repartido
+            esc.jugador_dueño.puntos_por_kills += bono_repartido
+        jugador_destino.morir()
+    else:
+        jugador_destino.hits -= total_hits_grupo
+
+    for esc in escuadrones_grupo:
+        esc.regresar_a_base()
 
 
 def sumar_puntos_personales(mapa_activo, todos_los_jugadores):
@@ -820,34 +1060,67 @@ def procesar_llegadas(todos_los_jugadores, mapa, minuto_actual=None):
     """
     Recorre todos los escuadrones del mapa; los que llegaron a destino
     este tick ("llego_a_destino") se resuelven según el tipo de destino.
+
+    Los que llegaron como parte de un RALLY (esc.rally is not None) se
+    agrupan por rally y se resuelven JUNTOS en un solo evento (combate
+    combinado o ataque conjunto a jugador). Los que llegaron solos se
+    resuelven individualmente, como siempre.
     """
+    solos = []
+    por_rally = {}
+
     for jugador in todos_los_jugadores:
         for escuadron in jugador.escuadrones():
             if escuadron.estado == "llego_a_destino":
-                if isinstance(escuadron.destino, Edificio):
-                    resolver_llegada_a_edificio(escuadron, escuadron.destino,
-                                                 todos_los_jugadores, minuto_actual)
-                elif isinstance(escuadron.destino, Jugador):
-                    resolver_llegada_a_jugador(escuadron, escuadron.destino)
+                if escuadron.rally is not None:
+                    por_rally.setdefault(escuadron.rally, []).append(escuadron)
+                else:
+                    solos.append(escuadron)
+
+    for escuadron in solos:
+        if isinstance(escuadron.destino, Edificio):
+            resolver_llegada_a_edificio(escuadron, escuadron.destino,
+                                         todos_los_jugadores, mapa, minuto_actual)
+        elif isinstance(escuadron.destino, Jugador):
+            resolver_llegada_a_jugador(escuadron, escuadron.destino)
+
+    for rally_obj, grupo in por_rally.items():
+        objetivo = grupo[0].destino
+        if isinstance(objetivo, Edificio):
+            resolver_llegada_grupal_edificio(grupo, objetivo, todos_los_jugadores, mapa, minuto_actual)
+        elif isinstance(objetivo, Jugador):
+            resolver_llegada_grupal_jugador(grupo, objetivo)
 
 
 # ============================================================
 # AGENTE EVOLUTIVO (basado en genoma)
 # ============================================================
 
-def decidir_accion_genoma(jugador, mapa, todos_los_jugadores):
+def decidir_accion_genoma(jugador, mapa, todos_los_jugadores, rallies, tick_actual):
     """
     Reemplazo del agente tonto: cada escuadrón "en_base" evalúa TODAS
-    las opciones disponibles (edificios libres + jugadores enemigos)
-    usando el genoma del jugador, y elige la de mayor puntaje.
+    las opciones disponibles (edificios libres, edificios enemigos
+    defendidos, jugadores enemigos) usando el genoma del jugador, y
+    elige la de mayor puntaje.
+
+    - Edificio LIBRE: captura instantánea al llegar, sin necesidad de
+      grupo -- va solo.
+    - Edificio ENEMIGO defendido: se ataca vía RALLY (se une a uno
+      existente del equipo hacia ese edificio, o abre uno nuevo) --
+      atacarlo en solitario contra varios defensores casi siempre pierde.
+    - Jugador enemigo: si el genoma valora la coordinación (w4 > 0),
+      intenta usar rally también (golpe combinado = más probable que
+      lo saque de combate de una vez); si no, ataca solo como siempre.
     """
+    w1, w2, w3, w4 = jugador.genoma
+
     for escuadron in jugador.escuadrones():
         if escuadron.estado != "en_base":
             continue
 
         mejor_opcion = None
         mejor_score = None
-        mejor_tipo = None  # "edificio" o "jugador"
+        mejor_tipo = None  # "edificio_libre", "edificio_enemigo" o "jugador"
 
         for edificio in mapa:
             if edificio.dueño is None:
@@ -860,7 +1133,18 @@ def decidir_accion_genoma(jugador, mapa, todos_los_jugadores):
                 if mejor_score is None or score > mejor_score:
                     mejor_score = score
                     mejor_opcion = edificio
-                    mejor_tipo = "edificio"
+                    mejor_tipo = "edificio_libre"
+            elif edificio.dueño != jugador.equipo:
+                asignados = contar_escuadrones_asignados(edificio, jugador.equipo, todos_los_jugadores)
+                if asignados >= MAX_ESCUADRONES_POR_EDIFICIO:
+                    continue
+                if jugador_ya_asignado_a(edificio, jugador):
+                    continue
+                score = puntaje_edificio_enemigo(escuadron, jugador, edificio, mapa, todos_los_jugadores)
+                if mejor_score is None or score > mejor_score:
+                    mejor_score = score
+                    mejor_opcion = edificio
+                    mejor_tipo = "edificio_enemigo"
 
         for enemigo in todos_los_jugadores:
             if enemigo.equipo == jugador.equipo:
@@ -870,15 +1154,45 @@ def decidir_accion_genoma(jugador, mapa, todos_los_jugadores):
                 continue
             if jugador_ya_asignado_a(enemigo, jugador):
                 continue  # tampoco puede mandar 2 escuadrones al mismo jugador
-            score = puntaje_jugador_enemigo(escuadron, jugador, enemigo, todos_los_jugadores)
+            score = puntaje_jugador_enemigo(escuadron, jugador, enemigo, mapa, todos_los_jugadores)
             if mejor_score is None or score > mejor_score:
                 mejor_score = score
                 mejor_opcion = enemigo
                 mejor_tipo = "jugador"
 
-        if mejor_opcion is not None:
-            if mejor_tipo == "edificio":
+        if mejor_opcion is None:
+            continue
+
+        if mejor_tipo == "edificio_libre":
+            escuadron.enviar_a_atacar(mejor_opcion)
+
+        elif mejor_tipo == "edificio_enemigo":
+            defensores = buscar_defensores_en_edificio(mejor_opcion, jugador.equipo, todos_los_jugadores)
+            if not defensores:
+                # sin defensores reales (huérfano) -> captura directa, no hace falta rally
                 escuadron.enviar_a_atacar(mejor_opcion)
+            else:
+                rally = buscar_rally_abierto(rallies, mejor_opcion, jugador.equipo)
+                if rally is not None:
+                    escuadron.unirse_a_rally(rally)
+                else:
+                    nuevo_rally = Rally(mejor_opcion, jugador.equipo, tick_actual, escuadron)
+                    escuadron.destino = mejor_opcion
+                    escuadron.estado = "esperando_rally"
+                    escuadron.rally = nuevo_rally
+                    rallies.append(nuevo_rally)
+
+        else:  # "jugador"
+            if w4 > 0:
+                rally = buscar_rally_abierto(rallies, mejor_opcion, jugador.equipo)
+                if rally is not None:
+                    escuadron.unirse_a_rally(rally)
+                else:
+                    nuevo_rally = Rally(mejor_opcion, jugador.equipo, tick_actual, escuadron)
+                    escuadron.destino = mejor_opcion
+                    escuadron.estado = "esperando_rally"
+                    escuadron.rally = nuevo_rally
+                    rallies.append(nuevo_rally)
             else:
                 escuadron.enviar_a_atacar_jugador(mejor_opcion)
 
@@ -924,27 +1238,41 @@ def decidir_teletransporte(jugador, mapa, todos_los_jugadores):
     y salta al CENTROIDE (punto promedio) de esos objetivos -- una posición
     que acorta el viaje de varios escuadrones a la vez, no solo de uno.
 
-    Solo se BLOQUEA si tiene escuadrones con un compromiso activo real
-    (defendiendo un edificio, o en camino a atacar/defender/pelear) --
-    esos sí se sabotearían si los arrastra. Un escuadrón "regresando_base"
-    NO bloquea el teletransporte: ya perdió su pelea, no está logrando
-    nada quedándose a medio camino, así que el jugador puede saltar y
-    se rellena de inmediato al llegar (ver Escuadron.teletransportar_con_jugador).
+    Solo se BLOQUEA si tiene un escuadrón "defendiendo" -- eso sí es una
+    conquista ya lograda que se perdería si lo arrastra. Escuadrones
+    "viajando_ataque" / "viajando_ataque_jugador" / "regresando_base" NO
+    bloquean: interrumpir un viaje a pie para saltar más cerca del
+    objetivo y llegar antes es estrictamente mejor que seguir caminando
+    toda la distancia original. Al llegar, decidir_accion() vuelve a
+    evaluar el mejor objetivo desde la nueva posición (puede ser el
+    mismo que ya llevaba, ahora mucho más cerca, u otro mejor).
     """
     if jugador.cooldown_teletransporte_restante > 0:
         return
 
     escuadrones = jugador.escuadrones()
-    ESTADOS_QUE_BLOQUEAN = ("viajando_ataque", "viajando_ataque_jugador", "defendiendo")
+    ESTADOS_QUE_BLOQUEAN = ("defendiendo",)
     if any(e.estado in ESTADOS_QUE_BLOQUEAN for e in escuadrones):
-        return  # tiene compromisos activos -- no vale la pena arrastrarlos
+        return  # ya conquistó algo -- no vale la pena arrastrarlo
 
-    # Preferimos un escuadrón que ya esté físicamente en base (posición
-    # exacta del jugador) para calcular distancias correctamente. Si
-    # todos están "regresando_base", usamos cualquiera como referencia
-    # aproximada -- el score de cercanía puede estar un poco desviado
-    # en ese caso puntual, pero no afecta la corrección del resto.
-    referencia = next((e for e in escuadrones if e.estado == "en_base"), escuadrones[0])
+    # El salto siempre parte de la posición ACTUAL del jugador (no de la
+    # de un escuadrón específico, que ahora puede estar a medio camino
+    # viajando). Usamos un objeto liviano con esa posición y el poder
+    # del escuadrón más fuerte disponible, solo para que las funciones
+    # de puntaje (que esperan un "escuadron" con .x/.y/.poder_actual())
+    # puedan reusarse sin cambios.
+    class _ReferenciaSalto:
+        def __init__(self, x, y, poder, jugador_dueño):
+            self.x = x
+            self.y = y
+            self._poder = poder
+            self.jugador_dueño = jugador_dueño
+
+        def poder_actual(self):
+            return self._poder
+
+    mas_fuerte = max(escuadrones, key=lambda e: e.poder_actual())
+    referencia = _ReferenciaSalto(jugador.x, jugador.y, mas_fuerte.poder_actual(), jugador)
 
     candidatos = []  # (score, x, y)
 
@@ -962,7 +1290,7 @@ def decidir_teletransporte(jugador, mapa, todos_los_jugadores):
         asignados = contar_escuadrones_asignados(enemigo, jugador.equipo, todos_los_jugadores)
         if asignados >= MAX_ESCUADRONES_POR_EDIFICIO:
             continue
-        score = puntaje_jugador_enemigo(referencia, jugador, enemigo, todos_los_jugadores)
+        score = puntaje_jugador_enemigo(referencia, jugador, enemigo, mapa, todos_los_jugadores)
         candidatos.append((score, enemigo.x, enemigo.y))
 
     if not candidatos:
@@ -985,21 +1313,23 @@ def decidir_teletransporte(jugador, mapa, todos_los_jugadores):
 # AGENTE TONTO -- se deja como referencia / comparación
 # ============================================================
 
+ESTADOS_COMPROMETIDOS = ("viajando_ataque", "defendiendo", "viajando_ataque_jugador", "esperando_rally")
+
+
 def contar_escuadrones_asignados(destino_objetivo, equipo, todos_los_jugadores):
     """
-    Cuenta cuántos escuadrones de un equipo ya están yendo hacia o
-    defendiendo/atacando este destino (edificio o jugador enemigo).
-    Sirve para el límite de defensa, el límite de ataque conjunto,
-    y para el término w4 del genoma (coordinación).
+    Cuenta cuántos escuadrones de un equipo ya están yendo hacia,
+    defendiendo/atacando, o REUNIÉNDOSE (rally) hacia este destino
+    (edificio o jugador enemigo). Sirve para el límite de defensa, el
+    límite de ataque conjunto, y para el término w4 del genoma
+    (coordinación).
     """
     contador = 0
     for j in todos_los_jugadores:
         if j.equipo != equipo:
             continue
         for esc in j.escuadrones():
-            if esc.destino is destino_objetivo and esc.estado in (
-                "viajando_ataque", "defendiendo", "viajando_ataque_jugador"
-            ):
+            if esc.destino is destino_objetivo and esc.estado in ESTADOS_COMPROMETIDOS:
                 contador += 1
     return contador
 
@@ -1015,15 +1345,13 @@ def jugador_ya_asignado_a(destino_objetivo, jugador):
     if isinstance(destino_objetivo, Edificio) and "campamento" in destino_objetivo.nombre:
         return False  # los campamentos no tienen esta restricción
     for esc in jugador.escuadrones():
-        if esc.destino is destino_objetivo and esc.estado in (
-            "viajando_ataque", "defendiendo", "viajando_ataque_jugador"
-        ):
+        if esc.destino is destino_objetivo and esc.estado in ESTADOS_COMPROMETIDOS:
             return True
     return False
 
 
 def puntaje_edificio(escuadron, jugador, edificio, todos_los_jugadores):
-    """Qué tan atractivo le parece a este genoma ir a este edificio."""
+    """Qué tan atractivo le parece a este genoma ir a este edificio (LIBRE)."""
     w1, w2, w3, w4 = jugador.genoma
 
     valor_puntos = edificio.tasa_alianza
@@ -1038,21 +1366,49 @@ def puntaje_edificio(escuadron, jugador, edificio, todos_los_jugadores):
     return score
 
 
-def poder_maximo_disponible(jugador_enemigo):
+def puntaje_edificio_enemigo(escuadron, jugador, edificio, mapa, todos_los_jugadores):
     """
-    Retorna el poder del escuadrón más fuerte que tiene el jugador
-    enemigo disponible AHORA MISMO en su base (listo para defenderse).
-    Si no tiene ninguno en base, retorna 0 (está totalmente expuesto).
+    Qué tan atractivo le parece a este genoma intentar RECAPTURAR un
+    edificio que ya controla el equipo enemigo. Considera el poder
+    combinado de TODOS sus defensores actuales (no solo uno), ya que
+    el ataque se va a resolver en grupo vía rally.
+    """
+    w1, w2, w3, w4 = jugador.genoma
+
+    valor_puntos = edificio.tasa_alianza
+    try:
+        cercania = 15 / distancia((escuadron.x, escuadron.y), (edificio.x, edificio.y))
+    except ZeroDivisionError:
+        cercania = 15
+
+    defensores = buscar_defensores_en_edificio(edificio, jugador.equipo, todos_los_jugadores)
+    poder_defensa_total = sum(calcular_poder_combate(d, mapa) for d in defensores)
+    mi_poder = calcular_poder_combate(escuadron, mapa)
+    poder_relativo = (mi_poder - poder_defensa_total) / 1_000_000
+
+    aliados_ya_asignados = contar_escuadrones_asignados(edificio, jugador.equipo, todos_los_jugadores)
+
+    score = w1 * valor_puntos + w2 * cercania + w3 * poder_relativo + w4 * aliados_ya_asignados
+    return score
+
+
+def poder_maximo_disponible(jugador_enemigo, mapa):
+    """
+    Retorna el poder de combate (ya con buffs/debuffs aplicados) del
+    escuadrón más fuerte que tiene el jugador enemigo disponible AHORA
+    MISMO en su base (listo para defenderse). Si no tiene ninguno en
+    base, retorna 0 (está totalmente expuesto).
     """
     mejor_poder = 0
     for esc in jugador_enemigo.escuadrones():
         if esc.estado == "en_base":
-            if esc.poder_actual() > mejor_poder:
-                mejor_poder = esc.poder_actual()
+            poder = calcular_poder_combate(esc, mapa)
+            if poder > mejor_poder:
+                mejor_poder = poder
     return mejor_poder
 
 
-def puntaje_jugador_enemigo(escuadron, jugador, enemigo, todos_los_jugadores):
+def puntaje_jugador_enemigo(escuadron, jugador, enemigo, mapa, todos_los_jugadores):
     """Qué tan atractivo le parece a este genoma atacar a este jugador enemigo."""
     w1, w2, w3, w4 = jugador.genoma
 
@@ -1062,8 +1418,9 @@ def puntaje_jugador_enemigo(escuadron, jugador, enemigo, todos_los_jugadores):
     except ZeroDivisionError:
         cercania = 15
 
-    poder_defensa_enemiga = poder_maximo_disponible(enemigo)
-    poder_relativo = (escuadron.poder_actual() - poder_defensa_enemiga) / 1_000_000
+    mi_poder = calcular_poder_combate(escuadron, mapa)
+    poder_defensa_enemiga = poder_maximo_disponible(enemigo, mapa)
+    poder_relativo = (mi_poder - poder_defensa_enemiga) / 1_000_000
 
     aliados_ya_asignados = contar_escuadrones_asignados(enemigo, jugador.equipo, todos_los_jugadores)
 
@@ -1071,10 +1428,15 @@ def puntaje_jugador_enemigo(escuadron, jugador, enemigo, todos_los_jugadores):
     return score
 
 
-def decidir_accion_agente_tonto(jugador, mapa, todos_los_jugadores):
+def decidir_accion_agente_tonto(jugador, mapa, todos_los_jugadores, rallies=None, tick_actual=None):
     """
-    Regla fija: cada escuadrón "en_base" va al edificio libre más cercano
-    que no haya alcanzado el límite de escuadrones asignados; si no hay
+    Regla fija (agente de referencia, sin rally ni recaptura de edificios
+    enemigos -- se deja simple a propósito para comparar contra el
+    agente evolutivo). `rallies` y `tick_actual` se ignoran, están solo
+    para que la firma sea intercambiable con decidir_accion_genoma.
+
+    Cada escuadrón "en_base" va al edificio libre más cercano que no
+    haya alcanzado el límite de escuadrones asignados; si no hay
     ninguno libre disponible, va al jugador enemigo más cercano.
     """
     for escuadron in jugador.escuadrones():
@@ -1151,6 +1513,7 @@ def simular_partida_con_replay(jugadores, duracion_segundos=DURACION_PARTIDA_SEG
     puntos_equipo_A = 0
     puntos_equipo_B = 0
     decidir_accion = decidir_accion_genoma if usar_genoma else decidir_accion_agente_tonto
+    rallies = []
 
     # Desglose de puntos de ALIANZA por fuente (para el reporte final)
     def categoria_de(edificio):
@@ -1188,7 +1551,9 @@ def simular_partida_con_replay(jugadores, duracion_segundos=DURACION_PARTIDA_SEG
             decidir_teletransporte(jugador, mapa_activo, jugadores)
 
         for jugador in jugadores:
-            decidir_accion(jugador, mapa_activo, jugadores)
+            decidir_accion(jugador, mapa_activo, jugadores, rallies, tick)
+
+        gestionar_rallies(rallies, tick)
 
         for equipo in ("equipo_A", "equipo_B"):
             total_con_bono = calcular_puntos_equipo_por_segundo(mapa_activo, equipo)
@@ -1267,6 +1632,7 @@ def simular_partida_con_jugadores(jugadores, duracion_segundos=DURACION_PARTIDA_
     puntos_equipo_B = 0
 
     decidir_accion = decidir_accion_genoma if usar_genoma else decidir_accion_agente_tonto
+    rallies = []
 
     for tick in range(duracion_segundos):
         minuto_actual = tick // 60
@@ -1287,7 +1653,9 @@ def simular_partida_con_jugadores(jugadores, duracion_segundos=DURACION_PARTIDA_
             decidir_teletransporte(jugador, mapa_activo, jugadores)
 
         for jugador in jugadores:
-            decidir_accion(jugador, mapa_activo, jugadores)
+            decidir_accion(jugador, mapa_activo, jugadores, rallies, tick)
+
+        gestionar_rallies(rallies, tick)
 
         puntos_equipo_A += calcular_puntos_equipo_por_segundo(mapa_activo, "equipo_A")
         puntos_equipo_B += calcular_puntos_equipo_por_segundo(mapa_activo, "equipo_B")
@@ -1729,6 +2097,109 @@ def jugar_duelo_personalizado(mi_genoma, rivales, jugadores_por_equipo=5, verbos
     return resultados
 
 
+# ============================================================
+# HERRAMIENTAS DE ANÁLISIS: sensibilidad y robustez
+# ============================================================
+
+def analizar_sensibilidad(nombre_parametro, valores, genoma_A, genoma_B,
+                           jugadores_por_equipo=5, repeticiones=5, verbose=True):
+    """
+    Corre la MISMA batalla (genoma_A vs genoma_B) variando UN SOLO
+    parámetro global (ej. "ESCALA_PUNTOS_KILL") por los valores que le
+    pases, para ver qué tan sensible es el resultado a ese número.
+
+    Cada valor se repite `repeticiones` veces (con distinto azar) y se
+    promedia, para no confundir "el parámetro importa" con "esta
+    partida tuvo suerte".
+
+    Ejemplo:
+        analizar_sensibilidad("ESCALA_PUNTOS_KILL", [5000, 10000, 20000, 40000],
+                               genoma_agresivo, genoma_defensivo)
+
+    Retorna una lista de dicts: [{"valor":..., "promedio_A":..., "promedio_B":...}, ...]
+    Modifica el parámetro global temporalmente y lo restaura al final.
+    """
+    if nombre_parametro not in globals():
+        raise ValueError(f"No existe un parámetro global llamado '{nombre_parametro}'")
+
+    valor_original = globals()[nombre_parametro]
+    resultados = []
+
+    try:
+        for valor in valores:
+            globals()[nombre_parametro] = valor
+            puntos_A_total = 0
+            puntos_B_total = 0
+            for _ in range(repeticiones):
+                jugadores = crear_jugadores_con_genomas(
+                    [genoma_A] * jugadores_por_equipo, [genoma_B] * jugadores_por_equipo)
+                r = simular_partida_con_jugadores(jugadores, usar_genoma=True, verbose=False)
+                puntos_A_total += r["puntos_equipo_A"]
+                puntos_B_total += r["puntos_equipo_B"]
+
+            promedio_A = puntos_A_total / repeticiones
+            promedio_B = puntos_B_total / repeticiones
+            resultados.append({"valor": valor, "promedio_A": promedio_A, "promedio_B": promedio_B})
+
+            if verbose:
+                print(f"  {nombre_parametro}={valor}: A={promedio_A:.0f}  B={promedio_B:.0f}  "
+                      f"(promedio de {repeticiones} partidas)")
+    finally:
+        globals()[nombre_parametro] = valor_original  # siempre se restaura, incluso si hay error
+
+    return resultados
+
+
+def evaluar_robustez(genoma, genoma_rival, jugadores_por_equipo=5, n_semillas=10, verbose=True):
+    """
+    Enfrenta el mismo par de genomas `n_semillas` veces, cada una con
+    una semilla aleatoria distinta, para ver qué tan CONSISTENTE es el
+    resultado -- si `genoma` le gana a `genoma_rival` en casi todas las
+    corridas, es una ventaja real; si el resultado varía mucho de
+    semilla a semilla, la diferencia observada en una sola partida no
+    es confiable.
+
+    Retorna un dict con victorias, empates (no debería haber, pero se
+    cuentan por seguridad) y la lista de diferencias de puntos de cada
+    corrida.
+    """
+    victorias_genoma = 0
+    victorias_rival = 0
+    diferencias = []
+
+    estado_random_previo = random.getstate()
+
+    for semilla in range(n_semillas):
+        random.seed(semilla)
+        jugadores = crear_jugadores_con_genomas(
+            [genoma] * jugadores_por_equipo, [genoma_rival] * jugadores_por_equipo)
+        r = simular_partida_con_jugadores(jugadores, usar_genoma=True, verbose=False)
+        dif = r["puntos_equipo_A"] - r["puntos_equipo_B"]
+        diferencias.append(dif)
+        if dif > 0:
+            victorias_genoma += 1
+        elif dif < 0:
+            victorias_rival += 1
+
+        if verbose:
+            print(f"  Semilla {semilla}: A={r['puntos_equipo_A']:.0f}  B={r['puntos_equipo_B']:.0f}  "
+                  f"({'gana mi genoma' if dif > 0 else 'gana el rival'})")
+
+    random.setstate(estado_random_previo)  # no contaminar el azar de lo que siga después
+
+    if verbose:
+        print()
+        print(f"  Resultado: mi genoma ganó {victorias_genoma}/{n_semillas} corridas "
+              f"({victorias_genoma/n_semillas*100:.0f}%)")
+
+    return {
+        "victorias_genoma": victorias_genoma,
+        "victorias_rival": victorias_rival,
+        "n_semillas": n_semillas,
+        "diferencias": diferencias,
+    }
+
+
 if __name__ == "__main__":
     # ==========================================================
     # DUELO PERSONALIZADO -- opcional. Si defines tu propio genoma
@@ -1736,6 +2207,26 @@ if __name__ == "__main__":
     # enfrentará contra el campeón de esta corrida y contra los
     # campeones guardados en el salón de la fama. Déjalo en None
     # para omitir esta sección.
+    #
+    # Qué es cada peso:
+    #   w1 -- qué tanto valora los puntos que da un edificio. Un w1
+    #         alto hace que prefiera edificios de tasa alta (como el
+    #         Castillo, 80/seg) sobre uno chico, aunque esté más lejos.
+    #   w2 -- qué tanto valora la cercanía. Un w2 alto prioriza lo que
+    #         tiene cerca, aunque valga menos, para no perder tiempo
+    #         viajando.
+    #   w3 -- qué tan agresivo es (aplica al evaluar atacar jugadores
+    #         y al evaluar recapturar edificios enemigos defendidos).
+    #         Se combina con la diferencia de poder entre tu fuerza y
+    #         la defensa enemiga disponible. Positivo = le gusta
+    #         atacar cuando tiene ventaja; negativo = evita el combate
+    #         directo casi siempre.
+    #   w4 -- qué tanto le importa la coordinación con sus aliados
+    #         (incluye la decisión de usar RALLY -- ataque conjunto
+    #         sincronizado -- contra jugadores enemigos). Positivo =
+    #         prefiere ir donde ya hay compañeros suyos asignados
+    #         (agruparse); negativo = prefiere repartirse y evitar
+    #         duplicar esfuerzo en el mismo objetivo.
     # ==========================================================
     MI_GENOMA = None
     # Ejemplo: MI_GENOMA = [0.5, 0.4, -0.6, 0.1]
