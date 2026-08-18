@@ -295,18 +295,38 @@ Al inicio del archivo, sección `# PARÁMETROS`. Categorías:
   archivo.
 - Desglose de puntos por fuente (castillo / otros edificios / campamentos
   / bono observatorio, y personal: defensa vs batallas) en la Gran Final.
-- **Visualizador mejorado** (2026-08-17): tooltips al pasar el mouse sobre
-  cualquier edificio (nombre real, tasas alianza/personal, efecto
-  especial), jugador (vidas restantes) o escuadrón (soldados, estado);
-  tamaño del escuadrón proporcional a sus soldados; anillo sólido =
-  defendiendo, punteado dorado = esperando rally, atenuado = regresando a
-  base; pips de vidas sobre cada jugador; panel de "Resumen final" debajo
-  del mapa con el desglose de puntos de alianza por fuente (barras),
-  pesos del genoma de cada equipo, y top 3 jugadores por puntos
-  personales -- antes todo eso solo se veía en la consola, nunca en el
-  HTML. Colores de equipo/acento re-validados con el validador de
+- **Visualizador mejorado** (2026-08-17, retocado 2026-08-18): tooltips
+  al pasar el mouse sobre cualquier edificio (nombre real, tasas
+  alianza/personal, efecto especial), jugador (vidas restantes) o
+  escuadrón (soldados, estado); tamaño del escuadrón proporcional a sus
+  soldados (rango chico a propósito, ver nota de solapamiento abajo);
+  borde blanco = defendiendo, borde punteado dorado = esperando rally,
+  atenuado = regresando a base (esto se dibuja en el borde del MISMO
+  círculo, no un anillo aparte -- ver por qué abajo); pips de vidas sobre
+  cada jugador (solo si está herido, para no saturar); panel de "Resumen
+  final" debajo del mapa con el desglose de puntos de alianza por fuente
+  (barras), pesos del genoma de cada equipo, y top 3 jugadores por
+  puntos personales -- antes todo eso solo se veía en la consola, nunca
+  en el HTML. Colores de equipo/acento re-validados con el validador de
   paletas (antes fallaban la banda de luminosidad para modo oscuro).
-  De paso se corrigió un bug real: `generar_replay_html()`/
+  - **Bug de solapamiento encontrado y corregido con capturas de pantalla
+    reales** (headless Chrome, ver sección de herramientas más abajo):
+    la primera versión usaba círculos más grandes + un anillo ADICIONAL
+    más grande todavía para marcar el estado -- con varios escuadrones
+    juntos (algo mucho más común ahora gracias a `w5`, refuerzo de
+    edificios) o varios jugadores cercanos (el juego solo garantiza
+    `SEPARACION_MINIMA=10` unidades, ~7px en pantalla), esto se veía como
+    una maraña ilegible tipo "flor". Se redujo el tamaño base, se cambió
+    el anillo extra por un simple borde sobre el mismo círculo (no
+    aumenta el área), y se agregó separación en espiral (ángulo dorado,
+    radio creciente) para escuadrones apilados exactamente en el mismo
+    punto. El anillo de teletransporte (código viejo, no tocado antes)
+    tenía el mismo problema cuando varios jugadores saltan a puntos
+    cercanos al arrancar la partida -- ahí no hay forma limpia de
+    despegarlos a todos (son destinos DISTINTOS, no el mismo punto), así
+    que se dejó fino y tenue a propósito: superpuestos leen como una
+    "ráfaga", no como una maraña de bordes duros.
+  - De paso se corrigió un bug real: `generar_replay_html()`/
   `_multiple()` escribían el archivo sin especificar `encoding="utf-8"`,
   así que en Windows usaban la codificación por defecto del sistema
   mientras el HTML declara `charset="UTF-8"` -- un mismatch que puede
@@ -442,6 +462,19 @@ fama → HTML) está en el `if __name__ == "__main__":` al final del
 archivo. Los valores de configuración de la corrida (población, jugadores
 por equipo, generaciones, paciencia) están en variables al principio de
 ese bloque — se cambian ahí, no hace falta tocar el resto del código.
+
+**Para revisar visualmente el HTML del replay sin abrir un navegador a
+mano** (útil al tocar `_PLANTILLA_HTML_REPLAY`): Chrome headless puede
+tomar una captura real, que sí se puede leer como imagen:
+```bash
+"/c/Program Files/Google/Chrome/Application/chrome.exe" --headless --disable-gpu \
+  --window-size=900,1400 --screenshot="captura.png" "file:///ruta/al/archivo.html"
+```
+Por defecto solo se ve el fotograma inicial (vacío). Para revisar un
+momento con más actividad, se puede generar una copia con el
+`dibujar(0, 0);` final reemplazado por `dibujar(N, 0);` (algún índice
+de fotograma intermedio) antes de tomar la captura -- así se descubrió
+y confirmó el bug de solapamiento de la sección 6.
 
 Ejemplos de uso de piezas sueltas (para scripts propios):
 

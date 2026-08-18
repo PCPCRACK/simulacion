@@ -284,7 +284,12 @@ function dibujar(idx, t) {
 
   // Jugadores (bases): cuadraditos, interpolados salvo teletransporte.
   // Cuando hay teletransporte, se dibuja un anillo que se expande en el
-  // punto de llegada para que el salto sea visible.
+  // punto de llegada para que el salto sea visible. Si varios jugadores
+  // saltan cerca uno del otro (comun apenas arranca la partida, cuando
+  // muchos saltan hacia la misma zona buena), los anillos se separan un
+  // poco en espiral -- si no, se amontonan en una maraña como los
+  // escuadrones apilados (ver mas abajo).
+  const dibujadosTeleport = {};
   const pos1J = {};
   f1.jugadores_pos.forEach(j => pos1J[j.nombre] = j);
   f0.jugadores_pos.forEach(j => {
@@ -298,16 +303,28 @@ function dibujar(idx, t) {
 
     if (esTeletransporte) {
       // anillo expandiéndose en el destino durante la transición
-      const rx = escalar(jn.x), ry = escalar(jn.y);
+      let rx = escalar(jn.x), ry = escalar(jn.y);
+      const claveT = Math.round(jn.x) + ',' + Math.round(jn.y);
+      const nT = dibujadosTeleport[claveT] || 0;
+      dibujadosTeleport[claveT] = nT + 1;
+      if (nT > 0) {
+        const distT = 6 + nT * 3;
+        rx += distT * Math.cos(nT * 2.399963);
+        ry += distT * Math.sin(nT * 2.399963);
+      }
+      // varios jugadores pueden saltar a puntos distintos pero cercanos
+      // entre si (comun al arrancar la partida) -- no hay forma limpia de
+      // despegarlos a todos sin un layout mas elaborado, asi que el
+      // anillo se deja fino y tenue: superpuestos leen como una "rafaga"
+      // en vez de una maraña de bordes duros.
       const progreso = Math.min(1, t * 1.6);
       ctx.beginPath();
-      ctx.arc(rx, ry, 6 + progreso * 18, 0, Math.PI * 2);
+      ctx.arc(rx, ry, 4 + progreso * 10, 0, Math.PI * 2);
       ctx.strokeStyle = colorEquipo(j.equipo);
-      ctx.globalAlpha = 0.7 * (1 - progreso);
-      ctx.lineWidth = 2;
+      ctx.globalAlpha = 0.35 * (1 - progreso);
+      ctx.lineWidth = 1;
       ctx.stroke();
       ctx.globalAlpha = 1;
-      ctx.lineWidth = 1;
     }
 
     ctx.beginPath();
@@ -317,13 +334,17 @@ function dibujar(idx, t) {
     ctx.fill();
     ctx.globalAlpha = 1;
 
-    // pips de vidas: hasta 4 puntitos arriba del jugador, llenos = vidas que le quedan
-    const inicioPip = x - 9;
-    for (let h = 0; h < 4; h++) {
-      ctx.beginPath();
-      ctx.arc(inicioPip + h * 6, y - 10, 1.7, 0, Math.PI * 2);
-      ctx.fillStyle = h < j.hits ? colorEquipo(j.equipo) : 'rgba(255,255,255,0.15)';
-      ctx.fill();
+    // pips de vidas: solo si esta herido (4/4 es el caso comun, no aporta
+    // verlo siempre -- y con jugadores cercanos entre si, una fila de pips
+    // por cada uno se amontona rapido). Fila angosta, centrada.
+    if (j.hits < 4) {
+      const inicioPip = x - 6;
+      for (let h = 0; h < 4; h++) {
+        ctx.beginPath();
+        ctx.arc(inicioPip + h * 4, y - 9, 1.3, 0, Math.PI * 2);
+        ctx.fillStyle = h < j.hits ? colorEquipo(j.equipo) : 'rgba(255,255,255,0.18)';
+        ctx.fill();
+      }
     }
 
     hbJugadores.push({ x, y, r: 8, data: j });
@@ -341,43 +362,49 @@ function dibujar(idx, t) {
     if (salto < 30) { ex = lerp(e.x, en.x, t); ey = lerp(e.y, en.y, t); }
     else if (t > 0.5) { ex = en.x; ey = en.y; }
 
-    // separacion visual de apilados
+    // tamano proporcional a los soldados que le quedan (mas fuerte = mas
+    // grande, pero con poco rango -- un circulo mucho mas grande que el
+    // viejo 3.5px fijo se solapa demasiado cuando hay varios jugadores
+    // cerca, ya que el juego solo garantiza SEPARACION_MINIMA=10 unidades
+    // entre ellos (~7px en pantalla)).
+    const radio = 2.2 + Math.min(1, e.soldados / CAPACIDAD_MAX_ESTIMADA) * 1.8;
+
+    // separacion visual de apilados EXACTOS (mismo edificio/rally, mismo
+    // punto): el primero se queda en el centro, el resto se reparte en
+    // espiral (angulo dorado, radio creciente) para que no se tapen.
     const clave = Math.round(ex) + ',' + Math.round(ey);
     const n = dibujados[clave] || 0;
     dibujados[clave] = n + 1;
-    const offx = n > 0 ? 6 * Math.cos(n * 2.1) : 0;
-    const offy = n > 0 ? 6 * Math.sin(n * 2.1) : 0;
+    const distOffset = n > 0 ? radio + 5 + n * 2.2 : 0;
+    const offx = n > 0 ? distOffset * Math.cos(n * 2.399963) : 0;
+    const offy = n > 0 ? distOffset * Math.sin(n * 2.399963) : 0;
 
     const x = escalar(ex) + offx, y = escalar(ey) + offy;
 
-    // tamano proporcional a los soldados que le quedan (mas fuerte = mas grande)
-    const radio = 2.5 + Math.min(1, e.soldados / CAPACIDAD_MAX_ESTIMADA) * 3.5;
-
+    // el estado se marca en el BORDE del mismo circulo (no un anillo
+    // extra aparte) para no aumentar el area que puede solaparse con
+    // escuadrones de otros jugadores cercanos: relleno normal = viajando;
+    // borde claro solido = defendiendo; borde dorado punteado = esperando
+    // rally; mas transparente = regresando a base.
     ctx.beginPath();
     ctx.arc(x, y, radio, 0, Math.PI * 2);
     ctx.fillStyle = colorEquipo(e.equipo);
     ctx.globalAlpha = e.estado === 'regresando_base' ? 0.4 : 0.95;
     ctx.fill();
-    ctx.globalAlpha = 1;
-
-    // anillo extra segun el estado: defendiendo = solido, esperando rally = punteado dorado
     if (e.estado === 'defendiendo') {
-      ctx.beginPath();
-      ctx.arc(x, y, radio + 2.5, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(215,222,230,0.7)';
-      ctx.lineWidth = 1.3;
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(255,255,255,0.85)';
       ctx.stroke();
     } else if (e.estado === 'esperando_rally') {
-      ctx.beginPath();
-      ctx.setLineDash([2, 2]);
-      ctx.arc(x, y, radio + 2.5, 0, Math.PI * 2);
+      ctx.setLineDash([1.4, 1.4]);
+      ctx.lineWidth = 1;
       ctx.strokeStyle = getCss('--accent');
-      ctx.lineWidth = 1.3;
       ctx.stroke();
       ctx.setLineDash([]);
     }
+    ctx.globalAlpha = 1;
 
-    hbEscuadrones.push({ x, y, r: Math.max(7, radio + 2), data: e });
+    hbEscuadrones.push({ x, y, r: Math.max(6, radio + 1.5), data: e });
   });
 
   const mins = String(f0.minuto).padStart(2, '0');
