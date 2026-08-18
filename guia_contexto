@@ -37,6 +37,26 @@ mundo con las reglas correctas y se deja que descubra qué funciona.
   campamentos, y matar jugadores enemigos ("Doctores").
 - Los puntos de edificios se generan **continuamente** mientras están bajo
   tu control (tasa por segundo), no como un valor fijo por captura.
+- **Dos marcadores paralelos, no uno solo** (confirmado 2026-08-17 con
+  investigación externa -- ver sección 7): el juego lleva **puntos de
+  ALIANZA** (deciden qué equipo gana el evento -- solo suben por
+  edificios+campamentos, tasa por segundo) y **puntos PERSONALES** (el
+  ranking/recompensa individual de cada jugador dentro de su alianza --
+  suben por la tasa personal de edificios/campamentos Y por combate:
+  golpear/matar enemigos). Las guías externas confirman que cada
+  edificio tiene columnas separadas "Alliance Points/sec" y "Personal
+  Points/sec", y que matar Doctores solo se menciona como fuente de
+  puntos PERSONALES, nunca como algo que mueva el marcador de alianza.
+  El motor (`paso3_motor_simulacion.py`) ya implementa esto
+  correctamente: `puntos_equipo_A/B` (decide quién gana la partida) es
+  puramente `tasa_alianza` de edificios; `jugador.puntos_personales`
+  (usado como fitness del algoritmo genético) es lo que suma la tasa
+  personal de edificios/campamentos MÁS `PUNTOS_POR_HIT`,
+  `PUNTOS_POR_MUERTE` y `ESCALA_PUNTOS_KILL` de combate. Vale la pena
+  tenerlo clarísimo porque la frase "los puntos vienen de 3 fuentes"
+  de arriba, leída rápido, puede sonar como si matar jugadores subiera
+  el marcador de alianza -- NO es así, ni en el juego real ni en el
+  motor.
 
 ### 2.2 Edificios (con datos reales del juego)
 
@@ -264,9 +284,41 @@ Al inicio del archivo, sección `# PARÁMETROS`. Categorías:
 
 ## 7. Pendiente / limitaciones conocidas
 
-- **`PUNTOS_POR_HIT`, `PUNTOS_POR_MUERTE`, `ESCALA_PUNTOS_KILL` son
-  valores inventados** — no hay dato real del juego de cuánto vale matar
-  a un jugador o a soldados. Prioridad si se consigue el dato real.
+- **`PUNTOS_POR_HIT`, `PUNTOS_POR_MUERTE`, `ESCALA_PUNTOS_KILL` siguen
+  siendo valores inventados -- se investigó externamente (2026-08-17) y
+  no se encontró el dato real.** Se buscó en varias guías del juego
+  (Packsify, ldshop.gg, treyexgaming, overcentral, lootbar, la wiki
+  lastasylumwiki.com) y no hay ninguna fuente pública con el valor
+  exacto de puntos por golpe/muerte de un Doctor -- parece ser un
+  número interno del juego que ninguna guía ni comunidad de datamining
+  documenta (el juego es reciente/nicho). Lo que SÍ se confirmó y
+  quedó validado por triangulación en 3 fuentes independientes: la
+  tabla completa de puntos de alianza/personal por edificio en la
+  sección 2.2 es exacta (incluye el ejemplo "Castillo 10 min = 48,000
+  puntos" = 80/seg × 600s, consistente). También se confirmó (ver nota
+  nueva en 2.1) que el juego lleva dos marcadores separados --
+  alianza (solo edificios) y personal (edificios + combate) -- lo cual
+  ya estaba bien implementado en el motor.
+  - **Impacto real de estos 3 valores inventados, medido con
+    `analizar_sensibilidad()`**: como los puntos de combate SOLO entran
+    a `puntos_personales` (nunca a `puntos_equipo_A/B`, ver 2.1), estos
+    3 parámetros **no cambian en absoluto quién gana una partida** --
+    confirmado corriendo el mismo par de genomas con las mismas
+    semillas variando cada uno en un rango 4x-16x: el marcador de
+    alianza salió IDÉNTICO en todos los casos. Sí importan para otra
+    cosa: el fitness del algoritmo genético (`calcular_fitness` =
+    `puntos_personales + BONO_VICTORIA` si ganó el equipo) -- ahí
+    determinan cuánto "premia" la evolución ser agresivo/buscar kills
+    relativo a jugar bien territorialmente. Recalibrarlos cambiaría QUÉ
+    ESTRATEGIA emerge, no quién gana partidas puntuales.
+  - **Bug de metodología encontrado y corregido en el camino**:
+    `analizar_sensibilidad()` no fijaba semilla entre repeticiones --
+    cada repetición usaba rosters (soldados totales, capacidades)
+    completamente aleatorios, así que con pocas repeticiones el ruido
+    de roster (partidas con márgenes de hasta 3x solo por azar) tapaba
+    cualquier efecto real del parámetro. Ahora usa semillas 0,1,2...
+    fijas para todos los valores del parámetro, igual que
+    `evaluar_robustez()`, para que la comparación sea pareada.
 - **Ya se corrieron dos evoluciones de producción con `w5`** (2026-08-17,
   población 150, 11v11, 10 partidas/genoma) — hallazgos:
   - **Corrida 1** (100% aleatoria desde cero, 59 generaciones): convergió

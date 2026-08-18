@@ -2223,9 +2223,15 @@ def analizar_sensibilidad(nombre_parametro, valores, genoma_A, genoma_B,
     parámetro global (ej. "ESCALA_PUNTOS_KILL") por los valores que le
     pases, para ver qué tan sensible es el resultado a ese número.
 
-    Cada valor se repite `repeticiones` veces (con distinto azar) y se
-    promedia, para no confundir "el parámetro importa" con "esta
-    partida tuvo suerte".
+    Cada valor se repite `repeticiones` veces y se promedia, para no
+    confundir "el parámetro importa" con "esta partida tuvo suerte". Las
+    `repeticiones` usan las MISMAS semillas para todos los valores del
+    parámetro (semilla 0, 1, 2...) -- así los rosters (soldados totales,
+    capacidades de escuadrón) son idénticos entre un valor y otro, y la
+    diferencia observada se debe solo al parámetro, no al azar de quién
+    le tocó más soldados. Sin esto, con pocas repeticiones el ruido de
+    roster (partidas con márgenes de hasta 3x solo por suerte) puede ser
+    más grande que el efecto real del parámetro y esconderlo.
 
     Ejemplo:
         analizar_sensibilidad("ESCALA_PUNTOS_KILL", [5000, 10000, 20000, 40000],
@@ -2239,13 +2245,15 @@ def analizar_sensibilidad(nombre_parametro, valores, genoma_A, genoma_B,
 
     valor_original = globals()[nombre_parametro]
     resultados = []
+    estado_random_previo = random.getstate()
 
     try:
         for valor in valores:
             globals()[nombre_parametro] = valor
             puntos_A_total = 0
             puntos_B_total = 0
-            for _ in range(repeticiones):
+            for semilla in range(repeticiones):
+                random.seed(semilla)
                 jugadores = crear_jugadores_con_genomas(
                     [genoma_A] * jugadores_por_equipo, [genoma_B] * jugadores_por_equipo)
                 r = simular_partida_con_jugadores(jugadores, usar_genoma=True, verbose=False)
@@ -2258,9 +2266,10 @@ def analizar_sensibilidad(nombre_parametro, valores, genoma_A, genoma_B,
 
             if verbose:
                 print(f"  {nombre_parametro}={valor}: A={promedio_A:.0f}  B={promedio_B:.0f}  "
-                      f"(promedio de {repeticiones} partidas)")
+                      f"(promedio de {repeticiones} partidas, mismas semillas)")
     finally:
         globals()[nombre_parametro] = valor_original  # siempre se restaura, incluso si hay error
+        random.setstate(estado_random_previo)  # no contaminar el azar de lo que siga después
 
     return resultados
 
