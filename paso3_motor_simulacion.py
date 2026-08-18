@@ -1733,8 +1733,47 @@ def generar_genoma_aleatorio():
     return [random.uniform(-1, 1) for _ in range(5)]
 
 
-def crear_poblacion_inicial(tamano):
-    return [generar_genoma_aleatorio() for _ in range(tamano)]
+def crear_poblacion_inicial(tamano, genomas_semilla=None, fraccion_sembrada=0.3):
+    """
+    Genera la población inicial (generación 0).
+
+    Si se pasan `genomas_semilla` (ej. los campeones del salón de la
+    fama), hasta `fraccion_sembrada` de la población arranca de ahí en
+    vez de ser 100% aleatoria -- así la evolución parte de estrategias
+    ya fuertes en vez de tener que redescubrirlas desde cero en cada
+    corrida (una corrida random-desde-cero de 59 generaciones no logró
+    superar a campeones ya refinados por 51-113 generaciones en
+    corridas anteriores -- ver guia_contexto).
+
+    Por cada semilla se generan 3 variantes:
+      - un clon exacto (preserva la estrategia probada, por si nada la
+        mejora en esta corrida),
+      - un clon con mutación amplia en los 5 genes (explora su
+        vecindario),
+      - un clon que conserva w1-w4 tal cual pero con w5 (refuerzo)
+        redibujado desde cero -- prueba directamente "esta estrategia
+        ya fuerte + refuerzo" en vez de esperar a que la mutación
+        normal, de paso pequeño, lo encuentre por casualidad.
+
+    El resto de la población se completa con genomas aleatorios, para
+    no perder diversidad genética y no converger prematuro sobre las
+    semillas.
+    """
+    poblacion = []
+    if genomas_semilla:
+        limite_sembrado = max(1, int(tamano * fraccion_sembrada))
+        for genoma in genomas_semilla:
+            if len(poblacion) >= limite_sembrado:
+                break
+            poblacion.append(list(genoma))
+            poblacion.append(cruzar_genomas(genoma, genoma, ruido=RUIDO_MUTACION * 4))
+            variante_w5 = list(genoma[:4]) + [random.uniform(-1, 1)]
+            poblacion.append(variante_w5)
+        poblacion = poblacion[:limite_sembrado]
+
+    while len(poblacion) < tamano:
+        poblacion.append(generar_genoma_aleatorio())
+    return poblacion
 
 
 def cruzar_genomas(genoma_a, genoma_b, ruido=RUIDO_MUTACION):
@@ -1829,7 +1868,8 @@ def crear_siguiente_generacion(resultados_fitness, tamano_poblacion):
 
 def evolucionar(tamano_poblacion=80, jugadores_por_equipo=5, max_generaciones=200,
                  generaciones_sin_mejora_limite=25, partidas_por_genoma=3,
-                 umbral_mejora=0.002, verbose=True):
+                 umbral_mejora=0.002, genomas_semilla=None, fraccion_sembrada=0.3,
+                 verbose=True):
     """
     Ciclo completo de evolución.
 
@@ -1844,8 +1884,12 @@ def evolucionar(tamano_poblacion=80, jugadores_por_equipo=5, max_generaciones=20
     Cada genoma juega `partidas_por_genoma` partidas por generación con
     equipos rebarajados, y su fitness es el promedio -- menos ruido que
     una sola partida.
+
+    `genomas_semilla` (opcional, ej. los genomas del salón de la fama):
+    si se pasa, la población inicial no arranca 100% aleatoria -- ver
+    `crear_poblacion_inicial()`.
     """
-    poblacion = crear_poblacion_inicial(tamano_poblacion)
+    poblacion = crear_poblacion_inicial(tamano_poblacion, genomas_semilla, fraccion_sembrada)
     mejor_promedio_historico = None
     generaciones_sin_mejora = 0
     historial = []
@@ -2327,12 +2371,27 @@ if __name__ == "__main__":
     PACIENCIA = 40            # generaciones sin mejora del promedio antes de parar
     PARTIDAS_POR_GENOMA = 10  # más partidas = menos ruido, más lento
 
+    # Sembrar la población inicial con los campeones del salón de la fama
+    # (en vez de arrancar 100% aleatoria) -- así la evolución parte de
+    # estrategias ya fuertes y las combina con genes nuevos (como w5) en
+    # vez de tener que redescubrirlas desde cero cada corrida. Ver
+    # crear_poblacion_inicial(). Desactivar poniendo esto en False.
+    SEMBRAR_DESDE_SALON_FAMA = True
+    FRACCION_SEMBRADA = 0.3   # como mucho el 30% de la población inicial viene de semillas
+
     if TAMANO_POBLACION < 8 * JUGADORES_POR_EQUIPO:
         raise SystemExit(f"tamano_poblacion ({TAMANO_POBLACION}) debe ser >= "
                          f"8 * jugadores_por_equipo ({8 * JUGADORES_POR_EQUIPO})")
 
+    genomas_semilla = None
+    if SEMBRAR_DESDE_SALON_FAMA:
+        genomas_semilla = [entrada["genoma"] for entrada in cargar_salon_fama()]
+
     print(f"Evolucionando: población={TAMANO_POBLACION}, "
           f"{JUGADORES_POR_EQUIPO} por equipo, {PARTIDAS_POR_GENOMA} partidas/genoma")
+    if genomas_semilla:
+        print(f"  sembrando desde {len(genomas_semilla)} campeón(es) del salón de la fama "
+              f"(hasta {FRACCION_SEMBRADA:.0%} de la población inicial)")
     print()
 
     res = evolucionar(
@@ -2341,6 +2400,8 @@ if __name__ == "__main__":
         max_generaciones=MAX_GENERACIONES,
         generaciones_sin_mejora_limite=PACIENCIA,
         partidas_por_genoma=PARTIDAS_POR_GENOMA,
+        genomas_semilla=genomas_semilla,
+        fraccion_sembrada=FRACCION_SEMBRADA,
         verbose=True,
     )
 

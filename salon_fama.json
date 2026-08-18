@@ -16,22 +16,6 @@
     }
   },
   {
-    "fecha": "2026-08-17T17:25:26",
-    "genoma": [
-      1.2145391142840762,
-      0.09900456465505299,
-      -0.04798682628738217,
-      0.2250165560038647,
-      0.0
-    ],
-    "parametros": {
-      "tamano_poblacion": 150,
-      "jugadores_por_equipo": 11,
-      "partidas_por_genoma": 10,
-      "generaciones_corridas": 113
-    }
-  },
-  {
     "fecha": "2026-08-17T17:41:08",
     "genoma": [
       0.44613106893951576,
@@ -45,6 +29,22 @@
       "jugadores_por_equipo": 11,
       "partidas_por_genoma": 10,
       "generaciones_corridas": 91
+    }
+  },
+  {
+    "fecha": "2026-08-17T17:25:26",
+    "genoma": [
+      1.2145391142840762,
+      0.09900456465505299,
+      -0.04798682628738217,
+      0.2250165560038647,
+      0.0
+    ],
+    "parametros": {
+      "tamano_poblacion": 150,
+      "jugadores_por_equipo": 11,
+      "partidas_por_genoma": 10,
+      "generaciones_corridas": 113
     }
   }
 ]

@@ -267,38 +267,47 @@ Al inicio del archivo, sección `# PARÁMETROS`. Categorías:
 - **`PUNTOS_POR_HIT`, `PUNTOS_POR_MUERTE`, `ESCALA_PUNTOS_KILL` son
   valores inventados** — no hay dato real del juego de cuánto vale matar
   a un jugador o a soldados. Prioridad si se consigue el dato real.
-- **Ya se corrió una evolución de producción con `w5`** (2026-08-17,
-  población 150, 11v11, 10 partidas/genoma, 59 generaciones) — hallazgos:
-  - La población convergió a `w5` casi máximo (~0.68-0.98) y `w3`
-    (agresividad) **negativo** — a esta escala, evolución encontró que
-    atrincherarse (reforzar fuerte, evitar el combate) rinde más que ser
-    agresivo. Contrasta con las corridas viejas (pre-rally, pre-`w5`)
-    donde emergía "economía pura, evitar combate" por otras razones.
-  - **Pero ese campeón NO logró superar a los campeones viejos del
-    salón de la fama** (agresivos, `w3` positivo, `w5=0`): en
-    round-robin de 15 partidas/par quedó en ~27% de victorias contra el
-    campo de 3. `salon_fama.json` se quedó igual (los 3 viejos siguen
-    siendo los mejores confirmados). Conclusión: el refuerzo SÍ es una
-    mejora dentro de su propia población (se auto-selecciona), pero una
-    corrida de 59 generaciones desde cero no alcanzó a superar
-    estrategias ya refinadas por 51-113 generaciones en corridas
-    anteriores. Vale la pena: (a) correr más generaciones/paciencia, o
-    (b) **sembrar la población inicial con los campeones del salón de
-    la fama** (mutados) en vez de arrancar 100% random, para que la
-    evolución parta de estrategias ya fuertes y las combine con `w5` en
-    vez de tener que redescubrirlas — `crear_poblacion_inicial()` hoy
-    siempre genera genomas aleatorios, no hay forma de sembrarla.
-  - **Bug de ruido encontrado y corregido**: `_round_robin_victorias()`
-    (usado por `actualizar_salon_fama()`) jugaba **un solo partido por
-    par** para decidir quién entra al salón de la fama — mismo problema
-    que ya se documentaba para el fitness del torneo, pero nunca se
-    había arreglado ahí. Se confirmó en la práctica: el campeón nuevo
-    perdió 0/3 en la comparación de un solo partido, pero
-    `evaluar_robustez()` con 15 semillas mostró que en realidad iba
-    47% contra el campeón #1 viejo (prácticamente parejo, no una
-    derrota clara). Ahora `_round_robin_victorias()` acepta
-    `partidas_por_par` (default 5) y promedia varios partidos por par,
-    igual que ya hacía el torneo.
+- **Ya se corrieron dos evoluciones de producción con `w5`** (2026-08-17,
+  población 150, 11v11, 10 partidas/genoma) — hallazgos:
+  - **Corrida 1** (100% aleatoria desde cero, 59 generaciones): convergió
+    a `w5` casi máximo (~0.68-0.98) y `w3` (agresividad) **negativo** —
+    atrincherarse (reforzar fuerte, evitar el combate) rindió más que
+    ser agresivo. Ese campeón perdió contra el salón de la fama viejo.
+  - **Bug de ruido encontrado y corregido en el camino**:
+    `_round_robin_victorias()` (usado por `actualizar_salon_fama()`)
+    jugaba **un solo partido por par** para decidir quién entra al
+    salón de la fama — mismo problema que ya se documentaba para el
+    fitness del torneo, pero nunca se había arreglado ahí. Ahora acepta
+    `partidas_por_par` (default 5) y promedia varios partidos, igual
+    que ya hacía el torneo.
+  - **Se agregó siembra de población inicial** (`crear_poblacion_inicial(
+    tamano, genomas_semilla, fraccion_sembrada)` + parámetro
+    `genomas_semilla` en `evolucionar()`): hasta 30% de la generación 0
+    arranca de clones/variantes de los campeones del salón de la fama
+    en vez de 100% random, para partir de estrategias ya fuertes.
+    Activado por defecto en `__main__` vía `SEMBRAR_DESDE_SALON_FAMA`.
+  - **Corrida 2** (sembrada desde el salón de la fama, 60 generaciones):
+    esta vez convergió a `w3` MUY alto (~1.1-1.3, agresivo) combinado
+    con `w5` MUY alto (~0.87-1.08) — agresión y refuerzo juntos, ya no
+    puramente defensivo. El round-robin de 5 partidas/par contra el
+    salón de la fama volvió a decir que perdía (5/15).
+  - **Hallazgo clave sobre el espacio de estrategias — es tipo
+    piedra-papel-tijera**: se verificó el campeón de la corrida 2 con
+    `evaluar_robustez()` (15-20 semillas) contra cada uno de los 3
+    campeones viejos POR SEPARADO: **75% de victorias contra el viejo
+    agresivo** (`w3=0.82`), pero solo **40% contra el viejo defensivo**
+    (`w3=-0.5`) y **27% contra el viejo economista puro** (`w1=1.2,
+    w3≈0`). Ningún genoma es universalmente superior -- cada estilo
+    (agresivo/defensivo/economista) tiene contrapartidas distintas. Por
+    eso el round-robin del salón de la fama (que enfrenta contra los 3
+    a la vez) es la medida correcta para "campeón real" -- un solo
+    matchup 1-vs-1, por muchas semillas que tenga, solo mide fuerza
+    contra ESE estilo particular, no en general. `evaluar_robustez()`
+    sirve para entender el POR QUÉ de un resultado, no para reemplazar
+    el round-robin como criterio de selección.
+  - `salon_fama.json` se quedó con los mismos 3 campeones originales
+    tras ambas corridas -- decisión correcta y ya verificada a fondo,
+    no un artefacto de ruido.
 - **`Jugador.esta_eliminado()` está definida pero nunca se usa** — no hay
   ninguna consecuencia en la simulación cuando un jugador se queda sin
   soldados en absoluto (reserva y escuadrones en 0). Decidir si debería
