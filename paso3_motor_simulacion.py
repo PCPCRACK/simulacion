@@ -634,9 +634,9 @@ class Jugador:
         self.destino = None
         self.cooldown_teletransporte_restante = 0
 
-        # Genoma: [w1, w2, w3, w4] -- si no se pasa uno ya evolucionado,
+        # Genoma: [w1, w2, w3, w4, w5] -- si no se pasa uno ya evolucionado,
         # arranca con valores aleatorios (generación 0)
-        self.genoma = genoma if genoma is not None else [random.uniform(-1, 1) for _ in range(4)]
+        self.genoma = genoma if genoma is not None else [random.uniform(-1, 1) for _ in range(5)]
 
         total_soldados = random.randint(18462, 26000)
         self.total_soldados_reserva = total_soldados  # baja cuando muere gente
@@ -1108,11 +1108,16 @@ def decidir_accion_genoma(jugador, mapa, todos_los_jugadores, rallies, tick_actu
     - Edificio ENEMIGO defendido: se ataca vía RALLY (se une a uno
       existente del equipo hacia ese edificio, o abre uno nuevo) --
       atacarlo en solitario contra varios defensores casi siempre pierde.
+    - Edificio PROPIO ya controlado: puede reforzarlo mandando un
+      escuadrón adicional como defensor (hasta MAX_ESCUADRONES_POR_EDIFICIO),
+      valorado por w5 -- sin esto, cada edificio quedaba con un único
+      defensor para siempre, sin importar cuánto valiera, porque el
+      agente nunca volvía a evaluar los edificios que ya tenía.
     - Jugador enemigo: si el genoma valora la coordinación (w4 > 0),
       intenta usar rally también (golpe combinado = más probable que
       lo saque de combate de una vez); si no, ataca solo como siempre.
     """
-    w1, w2, w3, w4 = jugador.genoma
+    w1, w2, w3, w4 = jugador.genoma[:4]
 
     for escuadron in jugador.escuadrones():
         if escuadron.estado != "en_base":
@@ -1145,6 +1150,17 @@ def decidir_accion_genoma(jugador, mapa, todos_los_jugadores, rallies, tick_actu
                     mejor_score = score
                     mejor_opcion = edificio
                     mejor_tipo = "edificio_enemigo"
+            else:  # edificio.dueño == jugador.equipo -- ya es mío, ¿reforzarlo?
+                asignados = contar_escuadrones_asignados(edificio, jugador.equipo, todos_los_jugadores)
+                if asignados >= MAX_ESCUADRONES_POR_EDIFICIO:
+                    continue
+                if jugador_ya_asignado_a(edificio, jugador):
+                    continue
+                score = puntaje_reforzar_edificio_propio(escuadron, jugador, edificio, todos_los_jugadores)
+                if mejor_score is None or score > mejor_score:
+                    mejor_score = score
+                    mejor_opcion = edificio
+                    mejor_tipo = "edificio_propio"
 
         for enemigo in todos_los_jugadores:
             if enemigo.equipo == jugador.equipo:
@@ -1163,7 +1179,7 @@ def decidir_accion_genoma(jugador, mapa, todos_los_jugadores, rallies, tick_actu
         if mejor_opcion is None:
             continue
 
-        if mejor_tipo == "edificio_libre":
+        if mejor_tipo == "edificio_libre" or mejor_tipo == "edificio_propio":
             escuadron.enviar_a_atacar(mejor_opcion)
 
         elif mejor_tipo == "edificio_enemigo":
@@ -1283,6 +1299,12 @@ def decidir_teletransporte(jugador, mapa, todos_los_jugadores):
                 continue
             score = puntaje_edificio(referencia, jugador, edificio, todos_los_jugadores)
             candidatos.append((score, edificio.x, edificio.y))
+        elif edificio.dueño == jugador.equipo:
+            asignados = contar_escuadrones_asignados(edificio, jugador.equipo, todos_los_jugadores)
+            if asignados >= MAX_ESCUADRONES_POR_EDIFICIO:
+                continue
+            score = puntaje_reforzar_edificio_propio(referencia, jugador, edificio, todos_los_jugadores)
+            candidatos.append((score, edificio.x, edificio.y))
 
     for enemigo in todos_los_jugadores:
         if enemigo.equipo == jugador.equipo:
@@ -1352,7 +1374,7 @@ def jugador_ya_asignado_a(destino_objetivo, jugador):
 
 def puntaje_edificio(escuadron, jugador, edificio, todos_los_jugadores):
     """Qué tan atractivo le parece a este genoma ir a este edificio (LIBRE)."""
-    w1, w2, w3, w4 = jugador.genoma
+    w1, w2, w3, w4 = jugador.genoma[:4]
 
     valor_puntos = edificio.tasa_alianza
     try:
@@ -1366,6 +1388,29 @@ def puntaje_edificio(escuadron, jugador, edificio, todos_los_jugadores):
     return score
 
 
+def puntaje_reforzar_edificio_propio(escuadron, jugador, edificio, todos_los_jugadores):
+    """
+    Qué tan atractivo le parece a este genoma mandar un escuadrón
+    ADICIONAL a un edificio que su equipo ya controla, sumándose como
+    defensor (hasta MAX_ESCUADRONES_POR_EDIFICIO). w5 gobierna esto de
+    forma independiente a w1 (que solo mide qué tanto valora CAPTURAR
+    edificios libres) -- un genoma puede evolucionar para valorar
+    capturar y defender de forma distinta.
+    """
+    w1, w2, w3, w4, w5 = jugador.genoma
+
+    valor_puntos = edificio.tasa_alianza
+    try:
+        cercania = 15 / distancia((escuadron.x, escuadron.y), (edificio.x, edificio.y))
+    except ZeroDivisionError:
+        cercania = 15
+
+    defensores_propios_ya_asignados = contar_escuadrones_asignados(edificio, jugador.equipo, todos_los_jugadores)
+
+    score = w5 * valor_puntos + w2 * cercania + w4 * defensores_propios_ya_asignados
+    return score
+
+
 def puntaje_edificio_enemigo(escuadron, jugador, edificio, mapa, todos_los_jugadores):
     """
     Qué tan atractivo le parece a este genoma intentar RECAPTURAR un
@@ -1373,7 +1418,7 @@ def puntaje_edificio_enemigo(escuadron, jugador, edificio, mapa, todos_los_jugad
     combinado de TODOS sus defensores actuales (no solo uno), ya que
     el ataque se va a resolver en grupo vía rally.
     """
-    w1, w2, w3, w4 = jugador.genoma
+    w1, w2, w3, w4 = jugador.genoma[:4]
 
     valor_puntos = edificio.tasa_alianza
     try:
@@ -1410,7 +1455,7 @@ def poder_maximo_disponible(jugador_enemigo, mapa):
 
 def puntaje_jugador_enemigo(escuadron, jugador, enemigo, mapa, todos_los_jugadores):
     """Qué tan atractivo le parece a este genoma atacar a este jugador enemigo."""
-    w1, w2, w3, w4 = jugador.genoma
+    w1, w2, w3, w4 = jugador.genoma[:4]
 
     valor_puntos = 0  # atacar un jugador no da puntos de edificio directos
     try:
@@ -1685,7 +1730,7 @@ def simular_partida(cantidad_por_equipo=5, duracion_segundos=DURACION_PARTIDA_SE
 # ============================================================
 
 def generar_genoma_aleatorio():
-    return [random.uniform(-1, 1) for _ in range(4)]
+    return [random.uniform(-1, 1) for _ in range(5)]
 
 
 def crear_poblacion_inicial(tamano):
@@ -2015,32 +2060,56 @@ def cargar_salon_fama(archivo=ARCHIVO_SALON_FAMA):
     if not os.path.exists(archivo):
         return []
     with open(archivo) as f:
-        return json.load(f)
+        historial = json.load(f)
+    # Compatibilidad: genomas guardados antes de agregar w5 (refuerzo de
+    # edificios propios) solo tienen 4 genes -- se completan con 0.0
+    # (neutral: nunca refuerza) para que sigan siendo jugables.
+    for entrada in historial:
+        while len(entrada["genoma"]) < 5:
+            entrada["genoma"].append(0.0)
+    return historial
 
 
-def _round_robin_victorias(genomas, jugadores_por_equipo):
-    """Enfrenta una lista de genomas todos-contra-todos (con clones) y
-    retorna la lista de victorias en el mismo orden que `genomas`."""
+def _round_robin_victorias(genomas, jugadores_por_equipo, partidas_por_par=5):
+    """
+    Enfrenta una lista de genomas todos-contra-todos (con clones),
+    jugando `partidas_por_par` partidas por cada par en vez de una sola.
+
+    Una sola partida se decide en buena parte por azar (soldados totales
+    aleatorios entre 18,462-26,000, capacidades de escuadrón con
+    variación ±3%, orden de evaluación) -- no solo por qué tan buena es
+    la estrategia. Con un único partido, un genoma realmente más fuerte
+    puede perder por mala suerte y quedar descartado del salón de la
+    fama injustamente (confirmado en la práctica: un campeón nuevo con
+    ~47% de winrate contra el salón de la fama en 15 semillas había
+    perdido 0/3 en la comparación de un solo partido por par). Retorna
+    las victorias acumuladas de cada genoma en el mismo orden que
+    `genomas`.
+    """
     victorias = [0] * len(genomas)
     for i in range(len(genomas)):
         for j in range(i + 1, len(genomas)):
-            jugadores = crear_jugadores_con_genomas(
-                [genomas[i]] * jugadores_por_equipo, [genomas[j]] * jugadores_por_equipo)
-            r = simular_partida_con_jugadores(jugadores, usar_genoma=True, verbose=False)
-            if r["puntos_equipo_A"] > r["puntos_equipo_B"]:
-                victorias[i] += 1
-            else:
-                victorias[j] += 1
+            for _ in range(partidas_por_par):
+                jugadores = crear_jugadores_con_genomas(
+                    [genomas[i]] * jugadores_por_equipo, [genomas[j]] * jugadores_por_equipo)
+                r = simular_partida_con_jugadores(jugadores, usar_genoma=True, verbose=False)
+                if r["puntos_equipo_A"] > r["puntos_equipo_B"]:
+                    victorias[i] += 1
+                else:
+                    victorias[j] += 1
     return victorias
 
 
 def actualizar_salon_fama(genoma_nuevo, jugadores_por_equipo=5, parametros=None,
-                           archivo=ARCHIVO_SALON_FAMA, tamano=TAMANO_SALON_FAMA, verbose=True):
+                           archivo=ARCHIVO_SALON_FAMA, tamano=TAMANO_SALON_FAMA,
+                           partidas_por_par=5, verbose=True):
     """
     Compara el campeón de esta corrida contra los que ya estaban guardados
     (hasta `tamano`, por defecto 3) mediante un mini-playoff round-robin
-    con clones, y conserva solo a los `tamano` mejores de TODOS ellos
-    juntos -- el salón de la fama nunca crece más de `tamano` entradas.
+    con clones (`partidas_por_par` partidas por cada par, no una sola --
+    ver `_round_robin_victorias`), y conserva solo a los `tamano` mejores
+    de TODOS ellos juntos -- el salón de la fama nunca crece más de
+    `tamano` entradas.
 
     Retorna la lista final (ordenada de mejor a peor) que quedó guardada.
     """
@@ -2058,16 +2127,18 @@ def actualizar_salon_fama(genoma_nuevo, jugadores_por_equipo=5, parametros=None,
     if len(genomas) == 1:
         nuevo_historial = candidatos
     else:
-        victorias = _round_robin_victorias(genomas, jugadores_por_equipo)
+        victorias = _round_robin_victorias(genomas, jugadores_por_equipo, partidas_por_par)
         orden = sorted(range(len(candidatos)), key=lambda k: victorias[k], reverse=True)
         nuevo_historial = [candidatos[i] for i in orden[:tamano]]
 
         if verbose:
+            partidos_jugados_c_uno = (len(candidatos) - 1) * partidas_por_par
             print(f"  === ACTUALIZANDO SALÓN DE LA FAMA ({len(candidatos)} candidatos, "
-                  f"se conservan los {min(tamano, len(candidatos))} mejores) ===")
+                  f"{partidas_por_par} partidas/par, se conservan los "
+                  f"{min(tamano, len(candidatos))} mejores) ===")
             for pos, i in enumerate(orden[:tamano], 1):
                 marca = " <- campeón de esta corrida" if candidatos[i] is entrada_nueva else ""
-                print(f"  {pos}. victorias={victorias[i]}  "
+                print(f"  {pos}. victorias={victorias[i]}/{partidos_jugados_c_uno}  "
                       f"genoma={[round(g, 2) for g in genomas[i]]}{marca}")
 
     with open(archivo, "w") as f:
@@ -2203,15 +2274,16 @@ def evaluar_robustez(genoma, genoma_rival, jugadores_por_equipo=5, n_semillas=10
 if __name__ == "__main__":
     # ==========================================================
     # DUELO PERSONALIZADO -- opcional. Si defines tu propio genoma
-    # aquí (4 números w1,w2,w3,w4), al final de la corrida se
+    # aquí (5 números w1,w2,w3,w4,w5), al final de la corrida se
     # enfrentará contra el campeón de esta corrida y contra los
     # campeones guardados en el salón de la fama. Déjalo en None
     # para omitir esta sección.
     #
     # Qué es cada peso:
-    #   w1 -- qué tanto valora los puntos que da un edificio. Un w1
-    #         alto hace que prefiera edificios de tasa alta (como el
-    #         Castillo, 80/seg) sobre uno chico, aunque esté más lejos.
+    #   w1 -- qué tanto valora los puntos que da un edificio LIBRE (al
+    #         capturarlo por primera vez). Un w1 alto hace que prefiera
+    #         edificios de tasa alta (como el Castillo, 80/seg) sobre
+    #         uno chico, aunque esté más lejos.
     #   w2 -- qué tanto valora la cercanía. Un w2 alto prioriza lo que
     #         tiene cerca, aunque valga menos, para no perder tiempo
     #         viajando.
@@ -2223,13 +2295,21 @@ if __name__ == "__main__":
     #         directo casi siempre.
     #   w4 -- qué tanto le importa la coordinación con sus aliados
     #         (incluye la decisión de usar RALLY -- ataque conjunto
-    #         sincronizado -- contra jugadores enemigos). Positivo =
-    #         prefiere ir donde ya hay compañeros suyos asignados
-    #         (agruparse); negativo = prefiere repartirse y evitar
-    #         duplicar esfuerzo en el mismo objetivo.
+    #         sincronizado -- contra jugadores enemigos, y la de
+    #         amontonar defensores extra en un mismo edificio propio).
+    #         Positivo = prefiere ir donde ya hay compañeros suyos
+    #         asignados (agruparse); negativo = prefiere repartirse y
+    #         evitar duplicar esfuerzo en el mismo objetivo.
+    #   w5 -- qué tanto valora REFORZAR un edificio que su equipo ya
+    #         controla, mandando un escuadrón adicional como defensor
+    #         (hasta 6 por edificio). Es independiente de w1: un genoma
+    #         puede valorar capturar territorio nuevo distinto de
+    #         defender el que ya tiene. Positivo = blinda sus edificios
+    #         valiosos; 0 o negativo = nunca vuelve a un edificio propio
+    #         una vez capturado (comportamiento anterior a este cambio).
     # ==========================================================
     MI_GENOMA = None
-    # Ejemplo: MI_GENOMA = [0.5, 0.4, -0.6, 0.1]
+    # Ejemplo: MI_GENOMA = [0.5, 0.4, -0.6, 0.1, 0.3]
 
     # ==========================================================
     # CONFIGURACIÓN DE LA CORRIDA -- cambia estos valores a lo que
