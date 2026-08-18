@@ -25,14 +25,14 @@ _PLANTILLA_HTML_REPLAY = """<!DOCTYPE html>
     --bg: #0d1117;
     --panel: #151b23;
     --line: #263140;
-    --team-a: #5aa9e6;
-    --team-a-dim: #2d4f66;
-    --team-b: #e6615a;
-    --team-b-dim: #663333;
+    --team-a: #3987e5;
+    --team-a-dim: #1f3a52;
+    --team-b: #e66767;
+    --team-b-dim: #522020;
     --free: #4a5568;
     --text: #d7dee6;
     --text-dim: #7c8a99;
-    --accent: #e6b85a;
+    --accent: #c98500;
   }
   * { box-sizing: border-box; }
   body {
@@ -75,13 +75,58 @@ _PLANTILLA_HTML_REPLAY = """<!DOCTYPE html>
     color: var(--text-dim); flex-wrap: wrap; justify-content: center; max-width: 720px;
   }
   .leyenda span { display: flex; align-items: center; gap: 5px; }
-  .sq { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+  .sq { width: 10px; height: 10px; border-radius: 2px; display: inline-block; flex-shrink: 0; }
+
+  .tooltip {
+    position: fixed; pointer-events: none; display: none; z-index: 20;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 10px; font-size: 0.75rem; color: var(--text);
+    max-width: 230px; line-height: 1.45; box-shadow: 0 6px 20px rgba(0,0,0,0.45);
+  }
+  .tooltip b { color: var(--accent); }
+  .tooltip .fila { display: flex; justify-content: space-between; gap: 12px; }
+  .tooltip .efecto { margin-top: 4px; color: var(--text-dim); }
+
+  .resumen {
+    width: 100%; max-width: 720px; margin-top: 18px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 10px; padding: 14px 18px 18px;
+    font-size: 0.8rem;
+  }
+  .resumen h2 {
+    font-size: 0.78rem; margin: 0 0 12px; color: var(--text-dim); font-weight: 600;
+    letter-spacing: 0.04em; text-transform: uppercase;
+  }
+  .resumen-equipos { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+  @media (max-width: 620px) { .resumen-equipos { grid-template-columns: 1fr; } }
+  .resumen-equipo { border-left: 2px solid var(--line); padding-left: 12px; }
+  .resumen-equipo.a { border-left-color: var(--team-a); }
+  .resumen-equipo.b { border-left-color: var(--team-b); }
+  .resumen-equipo h3 {
+    font-size: 0.82rem; margin: 0 0 10px; display: flex; align-items: center; gap: 7px;
+  }
+  .barra-fuente { margin-bottom: 7px; }
+  .barra-fuente .etq {
+    display: flex; justify-content: space-between; font-size: 0.7rem;
+    color: var(--text-dim); margin-bottom: 2px;
+  }
+  .barra-fuente .pista { background: rgba(255,255,255,0.07); border-radius: 4px; height: 6px; overflow: hidden; }
+  .barra-fuente .relleno { height: 100%; border-radius: 4px; }
+  .genoma-pesos { display: flex; gap: 5px; flex-wrap: wrap; margin: 10px 0; }
+  .genoma-pesos span {
+    background: rgba(255,255,255,0.06); border-radius: 5px; padding: 2px 6px;
+    font-size: 0.66rem; color: var(--text-dim);
+  }
+  .top-jugadores { font-size: 0.72rem; color: var(--text-dim); margin-top: 6px; }
+  .top-jugadores .fila { display: flex; justify-content: space-between; padding: 2px 0; }
+  .top-jugadores .fila b { color: var(--text); font-weight: 500; }
 </style>
 </head>
 <body>
 
+<div id="tooltip" class="tooltip"></div>
+
 <h1>ELIXIR SCRAMBLE -- REPLAY DE PARTIDA</h1>
-<div class="subt">Time-lapse de la simulacion, con interpolacion de movimiento entre fotogramas</div>
+<div class="subt">Time-lapse de la simulacion -- pasa el mouse sobre un edificio, jugador o escuadron para ver sus detalles</div>
 
 <div class="marcador">
   <div class="equipo"><span class="dot a"></span><span id="pa">0</span></div>
@@ -107,15 +152,77 @@ _PLANTILLA_HTML_REPLAY = """<!DOCTYPE html>
   <span><i class="sq" style="background:var(--team-b)"></i> Equipo B</span>
   <span><i class="sq" style="background:var(--free);border-radius:50%"></i> Edificio libre</span>
   <span><i class="sq" style="border:1px dashed var(--free);background:transparent;border-radius:50%"></i> Edificio aun no disponible</span>
+  <span><i class="sq" style="border:1.4px solid var(--text-dim);background:transparent;border-radius:50%"></i> Escuadron defendiendo</span>
+  <span><i class="sq" style="border:1.4px dashed var(--accent);background:transparent;border-radius:50%"></i> Escuadron esperando rally</span>
+  <span><i class="sq" style="background:var(--text-dim);opacity:0.45;border-radius:50%"></i> Escuadron regresando a base</span>
+  <span>Tamano del punto = soldados del escuadron</span>
+</div>
+
+<div class="resumen">
+  <h2>Resumen final de la partida</h2>
+  <div id="resumenBody"></div>
 </div>
 
 <script>
 const replay = REPLAY_DATA_PLACEHOLDER;
+const resumen = RESUMEN_DATA_PLACEHOLDER;
 
 const canvas = document.getElementById('mapa');
 const ctx = canvas.getContext('2d');
 const W = canvas.width, H = canvas.height;
 const MAPA_MAX = 1000;
+const CAPACIDAD_MAX_ESTIMADA = 4300; // techo aproximado de soldados de UN escuadron, para escalar su tamano
+
+const NOMBRES_EQUIPO = { equipo_A: 'Equipo A', equipo_B: 'Equipo B' };
+const ETIQUETAS_GENOMA = ['w1 puntos', 'w2 cercania', 'w3 agresividad', 'w4 coordinacion', 'w5 refuerzo'];
+const ETIQUETAS_FUENTE = {
+  'castillo': 'Castillo', 'otros edificios': 'Otros edificios',
+  'campamentos': 'Campamentos', 'bono observatorio': 'Bono observatorio',
+};
+const ESTADO_INFO = {
+  en_base: 'En base, listo para una orden nueva',
+  viajando_ataque: 'En camino a capturar/atacar un edificio',
+  viajando_ataque_jugador: 'En camino a atacar a un jugador enemigo',
+  defendiendo: 'Defendiendo un edificio capturado',
+  esperando_rally: 'Esperando a que el rally salga junto con el resto del grupo',
+  regresando_base: 'Regresando a base (perdio su ultimo combate)',
+  llego_a_destino: 'Acaba de llegar a su destino',
+};
+// Datos reales del edificio (tasas y efecto) -- estaticos durante toda la
+// partida, así que se guardan una sola vez aquí en vez de repetirlos en
+// cada fotograma del replay.
+const INFO_EDIFICIOS = {
+  'tienda de curacion #1': { tipo: 'Tienda de Curacion', alianza: 30, personal: 30,
+    efecto: 'Regenera soldados perdidos a la reserva de cada jugador del equipo que la controla.' },
+  'tienda de curacion #2': { tipo: 'Tienda de Curacion', alianza: 30, personal: 30,
+    efecto: 'Regenera soldados perdidos a la reserva de cada jugador del equipo que la controla.' },
+  'tienda de curacion #3': { tipo: 'Tienda de Curacion', alianza: 30, personal: 30,
+    efecto: 'Regenera soldados perdidos a la reserva de cada jugador del equipo que la controla.' },
+  'tienda de curacion #4': { tipo: 'Tienda de Curacion', alianza: 30, personal: 30,
+    efecto: 'Regenera soldados perdidos a la reserva de cada jugador del equipo que la controla.' },
+  'taller de alquimia #1': { tipo: 'Taller de Alquimia', alianza: 50, personal: 30,
+    efecto: 'Sin efecto especial -- alto valor en puntos puros.' },
+  'taller de alquimia #2': { tipo: 'Taller de Alquimia', alianza: 50, personal: 30,
+    efecto: 'Sin efecto especial -- alto valor en puntos puros.' },
+  'observatorio': { tipo: 'Observatorio', alianza: 10, personal: 30,
+    efecto: '+10% a los puntos de ALIANZA de todos los edificios del equipo.' },
+  'portal de migracion': { tipo: 'Portal de Migracion', alianza: 10, personal: 30,
+    efecto: '-50% al cooldown de teletransporte del equipo.' },
+  'altar maldito': { tipo: 'Altar Maldito', alianza: 10, personal: 30,
+    efecto: '-15% ATK/DEF/HP a los escuadrones enemigos.' },
+  'reliquias de guerra': { tipo: 'Reliquias de Guerra', alianza: 10, personal: 30,
+    efecto: '+15% ATK/DEF/HP a los escuadrones aliados.' },
+  'castillo': { tipo: 'Castillo de Elixir', alianza: 80, personal: 30,
+    efecto: 'Sin efecto especial -- el edificio mas valioso en puntos puros.' },
+  'campamento #1': { tipo: 'Campamento', alianza: 5, personal: 5,
+    efecto: 'Un mismo jugador puede mandar varios escuadrones aqui a la vez (unica excepcion a esa regla).' },
+  'campamento #2': { tipo: 'Campamento', alianza: 5, personal: 5,
+    efecto: 'Un mismo jugador puede mandar varios escuadrones aqui a la vez (unica excepcion a esa regla).' },
+};
+
+// Hitboxes del ultimo fotograma dibujado, en coordenadas de pantalla --
+// se usan para saber sobre qué elemento está el mouse (tooltip on hover).
+let hbEdificios = [], hbJugadores = [], hbEscuadrones = [];
 
 function escalar(v) { return v / MAPA_MAX * W; }
 function getCss(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
@@ -132,6 +239,7 @@ function dibujar(idx, t) {
   const f0 = replay[Math.floor(idx)];
   const f1 = replay[Math.min(Math.floor(idx) + 1, replay.length - 1)];
   ctx.clearRect(0, 0, W, H);
+  hbEdificios = []; hbJugadores = []; hbEscuadrones = [];
 
   ctx.strokeStyle = 'rgba(255,255,255,0.04)';
   ctx.lineWidth = 1;
@@ -170,6 +278,8 @@ function dibujar(idx, t) {
     ctx.textAlign = 'center';
     let nombre = e.nombre.replace('tienda de curacion', 'curacion').replace('taller de alquimia', 'alquimia');
     ctx.fillText(nombre, x, y - 14);
+
+    hbEdificios.push({ x, y, r: 11, data: e });
   });
 
   // Jugadores (bases): cuadraditos, interpolados salvo teletransporte.
@@ -206,6 +316,17 @@ function dibujar(idx, t) {
     ctx.globalAlpha = 0.9;
     ctx.fill();
     ctx.globalAlpha = 1;
+
+    // pips de vidas: hasta 4 puntitos arriba del jugador, llenos = vidas que le quedan
+    const inicioPip = x - 9;
+    for (let h = 0; h < 4; h++) {
+      ctx.beginPath();
+      ctx.arc(inicioPip + h * 6, y - 10, 1.7, 0, Math.PI * 2);
+      ctx.fillStyle = h < j.hits ? colorEquipo(j.equipo) : 'rgba(255,255,255,0.15)';
+      ctx.fill();
+    }
+
+    hbJugadores.push({ x, y, r: 8, data: j });
   });
 
   // Escuadrones: interpolados; los apilados en el mismo punto se separan
@@ -228,10 +349,35 @@ function dibujar(idx, t) {
     const offy = n > 0 ? 6 * Math.sin(n * 2.1) : 0;
 
     const x = escalar(ex) + offx, y = escalar(ey) + offy;
+
+    // tamano proporcional a los soldados que le quedan (mas fuerte = mas grande)
+    const radio = 2.5 + Math.min(1, e.soldados / CAPACIDAD_MAX_ESTIMADA) * 3.5;
+
     ctx.beginPath();
-    ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+    ctx.arc(x, y, radio, 0, Math.PI * 2);
     ctx.fillStyle = colorEquipo(e.equipo);
+    ctx.globalAlpha = e.estado === 'regresando_base' ? 0.4 : 0.95;
     ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // anillo extra segun el estado: defendiendo = solido, esperando rally = punteado dorado
+    if (e.estado === 'defendiendo') {
+      ctx.beginPath();
+      ctx.arc(x, y, radio + 2.5, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(215,222,230,0.7)';
+      ctx.lineWidth = 1.3;
+      ctx.stroke();
+    } else if (e.estado === 'esperando_rally') {
+      ctx.beginPath();
+      ctx.setLineDash([2, 2]);
+      ctx.arc(x, y, radio + 2.5, 0, Math.PI * 2);
+      ctx.strokeStyle = getCss('--accent');
+      ctx.lineWidth = 1.3;
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    hbEscuadrones.push({ x, y, r: Math.max(7, radio + 2), data: e });
   });
 
   const mins = String(f0.minuto).padStart(2, '0');
@@ -240,6 +386,115 @@ function dibujar(idx, t) {
   document.getElementById('pa').textContent = f0.puntos_A.toLocaleString();
   document.getElementById('pb').textContent = f0.puntos_B.toLocaleString();
   document.getElementById('slider').value = Math.floor(idx);
+}
+
+// ---- Tooltip on hover: busca el elemento mas cercano al mouse entre las
+// hitboxes del ultimo fotograma dibujado (escuadrones primero, son los
+// mas pequenos y quedan encima) y arma su contenido segun el tipo. ----
+function masCercano(lista, mx, my) {
+  let mejor = null, mejorDist = Infinity;
+  for (const h of lista) {
+    const d = Math.hypot(mx - h.x, my - h.y);
+    if (d <= h.r && d < mejorDist) { mejor = h.data; mejorDist = d; }
+  }
+  return mejor;
+}
+
+function contenidoTooltipEdificio(e) {
+  const info = INFO_EDIFICIOS[e.nombre] || { tipo: e.nombre, alianza: '?', personal: '?' };
+  const dueño = e.dueño ? NOMBRES_EQUIPO[e.dueño] : 'Libre (sin capturar)';
+  return `<b>${info.tipo}</b>`
+    + `<div class="fila"><span>Estado</span><span>${e.activo ? dueño : 'Aun bloqueado'}</span></div>`
+    + `<div class="fila"><span>Alianza/seg</span><span>${info.alianza}</span></div>`
+    + `<div class="fila"><span>Personal/seg</span><span>${info.personal}</span></div>`
+    + (info.efecto ? `<div class="efecto">${info.efecto}</div>` : '');
+}
+function contenidoTooltipJugador(j) {
+  return `<b>${j.nombre}</b> -- ${NOMBRES_EQUIPO[j.equipo] || j.equipo}`
+    + `<div class="fila"><span>Vidas</span><span>${'\\u25cf'.repeat(j.hits)}${'\\u25cb'.repeat(Math.max(0, 4 - j.hits))}</span></div>`;
+}
+function contenidoTooltipEscuadron(e) {
+  return `<b>Escuadron de ${e.jugador}</b> -- ${NOMBRES_EQUIPO[e.equipo] || e.equipo}`
+    + `<div class="fila"><span>Soldados</span><span>${e.soldados.toLocaleString()}</span></div>`
+    + `<div class="efecto">${ESTADO_INFO[e.estado] || e.estado}</div>`;
+}
+
+const tooltipEl = document.getElementById('tooltip');
+canvas.addEventListener('mousemove', (ev) => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+
+  let html = null;
+  const esc = masCercano(hbEscuadrones, mx, my);
+  if (esc) html = contenidoTooltipEscuadron(esc);
+  if (!html) { const j = masCercano(hbJugadores, mx, my); if (j) html = contenidoTooltipJugador(j); }
+  if (!html) { const ed = masCercano(hbEdificios, mx, my); if (ed) html = contenidoTooltipEdificio(ed); }
+
+  if (!html) { tooltipEl.style.display = 'none'; return; }
+  tooltipEl.innerHTML = html;
+  tooltipEl.style.display = 'block';
+  const margen = 14;
+  let left = ev.clientX + margen, top = ev.clientY + margen;
+  if (left + 230 > window.innerWidth) left = ev.clientX - 230 - margen;
+  tooltipEl.style.left = left + 'px';
+  tooltipEl.style.top = top + 'px';
+});
+canvas.addEventListener('mouseleave', () => { tooltipEl.style.display = 'none'; });
+
+// ---- Panel de resumen final: desglose de puntos de alianza por fuente,
+// pesos del genoma de cada equipo, y top jugadores por puntos personales.
+function renderResumen(r) {
+  const cont = document.getElementById('resumenBody');
+  if (!r || !r.desglose_alianza) {
+    cont.innerHTML = '<div style="color:var(--text-dim)">Esta batalla no trae desglose de puntos.</div>';
+    return;
+  }
+  let html = '<div class="resumen-equipos">';
+  ['equipo_A', 'equipo_B'].forEach((eq, idx) => {
+    const letra = idx === 0 ? 'a' : 'b';
+    const d = r.desglose_alianza[eq] || {};
+    const total = Object.values(d).reduce((a, b) => a + b, 0);
+    const color = colorEquipo(eq);
+
+    html += `<div class="resumen-equipo ${letra}">`
+      + `<h3><span class="dot ${letra}"></span>${NOMBRES_EQUIPO[eq]} -- ${Math.round(total).toLocaleString()} pts de alianza</h3>`;
+
+    for (const [clave, etiqueta] of Object.entries(ETIQUETAS_FUENTE)) {
+      const v = d[clave] || 0;
+      const pct = total > 0 ? (v / total * 100) : 0;
+      html += `<div class="barra-fuente">`
+        + `<div class="etq"><span>${etiqueta}</span><span>${Math.round(v).toLocaleString()} (${pct.toFixed(0)}%)</span></div>`
+        + `<div class="pista"><div class="relleno" style="width:${pct}%;background:${color}"></div></div>`
+        + `</div>`;
+    }
+
+    const genoma = idx === 0 ? r.genoma_1 : r.genoma_2;
+    if (genoma) {
+      html += '<div class="genoma-pesos">' + genoma.map((g, i) =>
+        `<span>${ETIQUETAS_GENOMA[i] || ('w' + (i + 1))}: ${g.toFixed(2)}</span>`).join('') + '</div>';
+    }
+
+    if (r.jugadores) {
+      const js = r.jugadores.filter(j => j.equipo === eq);
+      const defensa = js.reduce((a, j) => a + j.puntos_por_defensa, 0);
+      const kills = js.reduce((a, j) => a + j.puntos_por_kills, 0);
+      html += '<div class="top-jugadores">'
+        + `<div class="fila"><span>Puntos personales -- defensa</span><b>${Math.round(defensa).toLocaleString()}</b></div>`
+        + `<div class="fila"><span>Puntos personales -- combate</span><b>${Math.round(kills).toLocaleString()}</b></div>`
+        + '</div>';
+
+      const top3 = [...js].sort((a, b) => b.puntos_personales - a.puntos_personales).slice(0, 3);
+      if (top3.length) {
+        html += '<div class="top-jugadores" style="margin-top:6px">'
+          + top3.map(j => `<div class="fila"><span>${j.nombre}</span><b>${Math.round(j.puntos_personales).toLocaleString()} pts</b></div>`).join('')
+          + '</div>';
+      }
+    }
+
+    html += '</div>';
+  });
+  html += '</div>';
+  cont.innerHTML = html;
 }
 
 let cursor = 0;          // posicion continua entre frames
@@ -286,6 +541,7 @@ slider.addEventListener('input', () => {
 });
 
 dibujar(0, 0);
+renderResumen(resumen);
 </script>
 </body>
 </html>
@@ -2143,22 +2399,62 @@ def jugar_batalla(genoma_equipo_A, genoma_equipo_B, jugadores_por_equipo=5,
         print(f"{titulo}: A={resultado['puntos_equipo_A']:.0f}  B={resultado['puntos_equipo_B']:.0f}")
 
     resultado["titulo"] = titulo
+    resultado["genoma_1"] = genoma_equipo_A
+    resultado["genoma_2"] = genoma_equipo_B
     return resultado
+
+
+def _resumen_serializable(resultado):
+    """
+    Extrae del resultado de una partida (el dict que devuelven
+    simular_partida_con_replay/jugar_batalla/jugar_gran_final) solo lo
+    que hace falta para el panel de resumen del HTML -- desglose de
+    puntos de alianza por fuente, genomas de cada equipo, y estadísticas
+    personales por jugador. Cualquier clave ausente en `resultado` se
+    omite (el HTML ya sabe mostrar "sin datos" si falta algo).
+    """
+    resumen = {}
+    if "desglose_alianza" in resultado:
+        resumen["desglose_alianza"] = resultado["desglose_alianza"]
+    if "genoma_1" in resultado:
+        resumen["genoma_1"] = [round(g, 3) for g in resultado["genoma_1"]]
+    if "genoma_2" in resultado:
+        resumen["genoma_2"] = [round(g, 3) for g in resultado["genoma_2"]]
+    if "jugadores" in resultado:
+        resumen["jugadores"] = [
+            {
+                "nombre": j.nombre,
+                "equipo": j.equipo,
+                "puntos_personales": round(j.puntos_personales),
+                "puntos_por_kills": round(j.puntos_por_kills),
+                "puntos_por_defensa": round(j.puntos_por_defensa),
+            }
+            for j in resultado["jugadores"]
+        ]
+    return resumen
 
 
 def generar_replay_html_multiple(batallas, ruta_salida):
     """
     Genera un solo HTML con VARIAS batallas y un selector para cambiar
-    entre ellas. `batallas` es una lista de dicts con claves:
-    "titulo" (texto del selector) y "replay" (los frames grabados).
+    entre ellas. `batallas` es una lista de dicts -- típicamente los
+    resultados completos que devuelven jugar_batalla()/jugar_gran_final()
+    (con "titulo" agregado), aunque solo "titulo" y "replay" son
+    obligatorios. Si además trae "desglose_alianza"/"jugadores"/
+    "genoma_1"/"genoma_2", el HTML muestra un panel de resumen final
+    (puntos de alianza por fuente, pesos del genoma, top jugadores).
     """
-    datos = [{"titulo": b["titulo"], "replay": b["replay"]} for b in batallas]
+    datos = [
+        {"titulo": b["titulo"], "replay": b["replay"], "resumen": _resumen_serializable(b)}
+        for b in batallas
+    ]
     datos_json = json.dumps(datos)
 
     plantilla = _PLANTILLA_HTML_REPLAY.replace(
-        "const replay = REPLAY_DATA_PLACEHOLDER;",
+        "const replay = REPLAY_DATA_PLACEHOLDER;\nconst resumen = RESUMEN_DATA_PLACEHOLDER;",
         "const batallas = " + datos_json + ";\n"
-        "let replay = batallas[0].replay;"
+        "let replay = batallas[0].replay;\n"
+        "let resumen = batallas[0].resumen;"
     )
 
     plantilla = plantilla.replace(
@@ -2167,7 +2463,7 @@ def generar_replay_html_multiple(batallas, ruta_salida):
     )
 
     plantilla = plantilla.replace(
-        "dibujar(0, 0);",
+        "dibujar(0, 0);\nrenderResumen(resumen);",
         """const selBatalla = document.getElementById('selBatalla');
 batallas.forEach((b, i) => {
   const op = document.createElement('option');
@@ -2176,32 +2472,41 @@ batallas.forEach((b, i) => {
 });
 selBatalla.addEventListener('change', () => {
   pause();
-  replay = batallas[parseInt(selBatalla.value)].replay;
+  const b = batallas[parseInt(selBatalla.value)];
+  replay = b.replay;
+  resumen = b.resumen;
   slider.max = replay.length - 1;
   cursor = 0;
   dibujar(0, 0);
+  renderResumen(resumen);
 });
 
-dibujar(0, 0);"""
+dibujar(0, 0);
+renderResumen(resumen);"""
     )
 
-    with open(ruta_salida, "w") as f:
+    with open(ruta_salida, "w", encoding="utf-8") as f:
         f.write(plantilla)
 
     return ruta_salida
 
 
-def generar_replay_html(replay, ruta_salida):
+def generar_replay_html(replay, ruta_salida, resultado=None):
     """
     Toma la lista `replay` (de simular_partida_con_replay) y genera un
     archivo HTML autocontenido con el visualizador de time-lapse, listo
-    para abrir en el navegador.
+    para abrir en el navegador. Si además se pasa `resultado` (el dict
+    completo que devuelve simular_partida_con_replay/jugar_batalla),
+    se agrega el panel de resumen final -- opcional, para no romper
+    llamadas existentes que solo tenían el replay a mano.
     """
     replay_json = json.dumps(replay)
+    resumen_json = json.dumps(_resumen_serializable(resultado) if resultado else {})
 
     plantilla = _PLANTILLA_HTML_REPLAY.replace("REPLAY_DATA_PLACEHOLDER", replay_json)
+    plantilla = plantilla.replace("RESUMEN_DATA_PLACEHOLDER", resumen_json)
 
-    with open(ruta_salida, "w") as f:
+    with open(ruta_salida, "w", encoding="utf-8") as f:
         f.write(plantilla)
 
     return ruta_salida
@@ -2537,8 +2842,8 @@ if __name__ == "__main__":
     )
 
     batallas = [
-        {"titulo": "Gran final: campeón vs subcampeón del playoff", "replay": res_final["replay"]},
-        {"titulo": "Campeón vs mejor de generación 0", "replay": res_vs_origen["replay"]},
+        {**res_final, "titulo": "Gran final: campeón vs subcampeón del playoff"},
+        {**res_vs_origen, "titulo": "Campeón vs mejor de generación 0"},
     ]
 
     # Salón de la fama: se compara el campeón de esta corrida contra los
@@ -2569,8 +2874,7 @@ if __name__ == "__main__":
             })
         resultados_duelo = jugar_duelo_personalizado(
             MI_GENOMA, rivales, jugadores_por_equipo=JUGADORES_POR_EQUIPO, verbose=True)
-        for r in resultados_duelo:
-            batallas.append({"titulo": r["titulo"], "replay": r["replay"]})
+        batallas.extend(resultados_duelo)
 
     generar_replay_html_multiple(batallas, "gran_final.html")
     print()

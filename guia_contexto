@@ -295,6 +295,24 @@ Al inicio del archivo, sección `# PARÁMETROS`. Categorías:
   archivo.
 - Desglose de puntos por fuente (castillo / otros edificios / campamentos
   / bono observatorio, y personal: defensa vs batallas) en la Gran Final.
+- **Visualizador mejorado** (2026-08-17): tooltips al pasar el mouse sobre
+  cualquier edificio (nombre real, tasas alianza/personal, efecto
+  especial), jugador (vidas restantes) o escuadrón (soldados, estado);
+  tamaño del escuadrón proporcional a sus soldados; anillo sólido =
+  defendiendo, punteado dorado = esperando rally, atenuado = regresando a
+  base; pips de vidas sobre cada jugador; panel de "Resumen final" debajo
+  del mapa con el desglose de puntos de alianza por fuente (barras),
+  pesos del genoma de cada equipo, y top 3 jugadores por puntos
+  personales -- antes todo eso solo se veía en la consola, nunca en el
+  HTML. Colores de equipo/acento re-validados con el validador de
+  paletas (antes fallaban la banda de luminosidad para modo oscuro).
+  De paso se corrigió un bug real: `generar_replay_html()`/
+  `_multiple()` escribían el archivo sin especificar `encoding="utf-8"`,
+  así que en Windows usaban la codificación por defecto del sistema
+  mientras el HTML declara `charset="UTF-8"` -- un mismatch que puede
+  corromper tildes/ñ en el navegador. `generar_replay_html()` ahora
+  acepta un `resultado` opcional para incluir el panel de resumen
+  también en scripts sueltos (antes solo recibía el replay).
 
 ---
 
@@ -376,6 +394,20 @@ Al inicio del archivo, sección `# PARÁMETROS`. Categorías:
   - `salon_fama.json` se quedó con los mismos 3 campeones originales
     tras ambas corridas -- decisión correcta y ya verificada a fondo,
     no un artefacto de ruido.
+- **Corrida 3, tras agregar combate real al ataque directo a jugadores**
+  (2026-08-17, sembrada, 77 generaciones) -- cambio grande de estrategia:
+  toda la población convergió a agresividad muy alta (`w3` 0.9-1.3, antes
+  rondaba 0 o negativo) y a EVITAR el rally contra jugadores (`w4`
+  fuertemente negativo, hasta -0.99) -- una vez que atacar a alguien
+  bien defendido conlleva riesgo real, la población aprendió a buscar
+  blancos expuestos en vez de forzar ataques coordinados. El campeón
+  (`[0.51, 0.84, 1.34, -0.99, 0.66]`) SÍ entró al salón de la fama esta
+  vez (10/15 en el round-robin, 2do lugar) -- la primera vez en la
+  sesión que un campeón nuevo desplaza a uno de los 3 originales.
+  `salon_fama.json` quedó: agresivo viejo (11/15), este campeón nuevo
+  (10/15), economista puro (6/15) -- se cayó el genoma defensivo puro
+  (`w3=-0.5`), consistente con que ya no rinde evitar el combate cuando
+  también hay que evitar EXPONERSE (quedarse sin escuadrones en base).
 - **`Jugador.esta_eliminado()` está definida pero nunca se usa** — no hay
   ninguna consecuencia en la simulación cuando un jugador se queda sin
   soldados en absoluto (reserva y escuadrones en 0). Decidir si debería
@@ -416,10 +448,11 @@ Ejemplos de uso de piezas sueltas (para scripts propios):
 ```python
 from paso3_motor_simulacion import *
 
-# Una partida cualquiera con replay
+# Una partida cualquiera con replay (con panel de resumen -- pasa
+# `resultado` completo, no solo resultado["replay"], si lo quieres)
 jugadores = crear_jugadores(cantidad_por_equipo=5)
 resultado = simular_partida_con_replay(jugadores, usar_genoma=True)
-generar_replay_html(resultado["replay"], "mi_partida.html")
+generar_replay_html(resultado["replay"], "mi_partida.html", resultado=resultado)
 
 # Evolución completa
 res = evolucionar(tamano_poblacion=80, jugadores_por_equipo=5, verbose=True)
