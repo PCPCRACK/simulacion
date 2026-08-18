@@ -109,6 +109,19 @@ puntos *personales* sí los gana cada defensor individualmente, sin dividir.
   enfrenta en secuencia con el poder que le va quedando. En un ataque de
   **rally** (grupo sincronizado), se combina el poder de todo el grupo
   contra el poder combinado de todos los defensores en una sola batalla.
+- **Atacar a un jugador enemigo directamente (Sistema 2) SÍ es
+  combate real** *(confirmado por el usuario 2026-08-17)*, contra el
+  escuadrón más fuerte que ese jugador tenga disponible AHORA MISMO en
+  su base (si sacó sus 3 escuadrones y no le queda ninguno en base, no
+  hay quién lo defienda y el golpe es gratis). Si hay defensor y el
+  atacante gana, el golpe conecta igual (o los golpes combinados, si es
+  rally) Y el defensor cae; si el defensor gana, repele el ataque
+  completo y no conecta ningún golpe. Antes de este cambio, atacar a un
+  jugador era SIEMPRE gratis sin importar su defensa -- inconsistente
+  con que `puntaje_jugador_enemigo()` (la función que decide si vale la
+  pena atacarlo) sí pondera esa defensa como si importara. Corregido en
+  `resolver_llegada_a_jugador()` / `resolver_llegada_grupal_jugador()`
+  (ver `escuadron_defensor_disponible()`).
 - Un jugador solo puede mandar **un escuadrón por objetivo** (edificio o
   jugador enemigo) — excepto a los campamentos, donde puede mandar varios.
 - Máximo **6 escuadrones** pueden defender o atacar juntos un mismo
@@ -253,6 +266,9 @@ Al inicio del archivo, sección `# PARÁMETROS`. Categorías:
 - Combate 1v1 y secuencial (varios defensores, ataque solitario).
 - **Rally**: ataque conjunto sincronizado, tanto contra edificios
   defendidos como contra jugadores enemigos, con combate combinado.
+- Ataque directo a un jugador (Sistema 2) con combate real contra su
+  mejor escuadrón disponible en base -- gratis solo si no le queda
+  ninguno en base (agregado 2026-08-17, antes era siempre gratis).
 - Sistema de vidas/muerte con arrastre de escuadrones.
 - Curación real (regenera reserva, no escuadrones directamente).
 - Buffs/debuffs de Reliquias de Guerra y Altar Maldito aplicados al poder

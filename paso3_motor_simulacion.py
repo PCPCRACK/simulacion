@@ -879,11 +879,17 @@ def resolver_llegada_a_edificio(escuadron_atacante, edificio, todos_los_jugadore
         escuadron_atacante.regresar_a_base()
 
 
-def resolver_llegada_a_jugador(escuadron_atacante, jugador_destino):
+def resolver_llegada_a_jugador(escuadron_atacante, jugador_destino, mapa):
     """
     Se llama cuando un escuadrón termina su viaje hacia un Jugador.
     Puede ser: (a) está regresando a SU PROPIO jugador (relleno de base),
     o (b) llegó a atacar a un jugador ENEMIGO (Sistema 2), en solitario.
+
+    El ataque a un jugador enemigo SÍ pelea contra su mejor escuadrón
+    disponible en base (ver escuadron_defensor_disponible): si no tiene
+    ninguno, el golpe es gratis (queda expuesto); si tiene uno y lo
+    vence, el golpe conecta igual y la defensa cae; si el defensor
+    gana, repele el ataque -- el atacante cae sin conectar ningún golpe.
     """
     equipo_atacante = escuadron_atacante.jugador_dueño.equipo
 
@@ -892,9 +898,45 @@ def resolver_llegada_a_jugador(escuadron_atacante, jugador_destino):
         escuadron_atacante.estado = "en_base"
         escuadron_atacante.destino = None
         escuadron_atacante.rellenar_desde_reserva()
-    else:
-        # Es un jugador enemigo -> Sistema 2, ataque directo
+        return
+
+    defensor = escuadron_defensor_disponible(jugador_destino, mapa)
+
+    if defensor is None:
+        # Sin defensa disponible -> expuesto, golpe gratis
         jugador_destino.recibir_ataque_directo(escuadron_atacante.jugador_dueño)
+        escuadron_atacante.regresar_a_base()
+        return
+
+    poder_atacante = calcular_poder_combate(escuadron_atacante, mapa)
+    poder_defensor = calcular_poder_combate(defensor, mapa)
+    ganador = resolver_combate(poder_atacante, poder_defensor)
+    poder_eliminado = min(poder_atacante, poder_defensor)
+    puntos_combate = poder_eliminado / ESCALA_PUNTOS_KILL
+
+    if ganador == "A":
+        # El atacante vence a la defensa: el golpe conecta Y cae el defensor
+        escuadron_atacante.jugador_dueño.puntos_personales += puntos_combate
+        escuadron_atacante.jugador_dueño.puntos_por_kills += puntos_combate
+        defensor.jugador_dueño.puntos_personales += puntos_combate * FRACCION_PUNTOS_PERDEDOR
+        defensor.jugador_dueño.puntos_por_kills += puntos_combate * FRACCION_PUNTOS_PERDEDOR
+
+        defensor.soldados_actuales = 0
+        defensor.regresar_a_base()
+        escuadron_atacante.soldados_actuales = round(
+            escuadron_atacante.soldados_actuales * FRACCION_SOLDADOS_SOBREVIVIENTES)
+
+        jugador_destino.recibir_ataque_directo(escuadron_atacante.jugador_dueño)
+        escuadron_atacante.regresar_a_base()
+    else:
+        # La defensa repele: ningún golpe conecta, el atacante cae
+        defensor.jugador_dueño.puntos_personales += puntos_combate
+        defensor.jugador_dueño.puntos_por_kills += puntos_combate
+        escuadron_atacante.jugador_dueño.puntos_personales += puntos_combate * FRACCION_PUNTOS_PERDEDOR
+        escuadron_atacante.jugador_dueño.puntos_por_kills += puntos_combate * FRACCION_PUNTOS_PERDEDOR
+
+        defensor.soldados_actuales = round(defensor.soldados_actuales * FRACCION_SOLDADOS_SOBREVIVIENTES)
+        escuadron_atacante.soldados_actuales = 0
         escuadron_atacante.regresar_a_base()
 
 
@@ -971,15 +1013,16 @@ def resolver_llegada_grupal_edificio(escuadrones_grupo, edificio, todos_los_juga
         # el edificio se queda como estaba
 
 
-def resolver_llegada_grupal_jugador(escuadrones_grupo, jugador_destino):
+def resolver_llegada_grupal_jugador(escuadrones_grupo, jugador_destino, mapa):
     """
-    Versión de resolver_llegada_a_jugador para un RALLY: varios
-    escuadrones llegan al mismo tick contra el mismo jugador enemigo.
-    Como el Sistema 2 no usa poder (siempre resta 1 hit por escuadrón
-    que llega), la ventaja real de agrupar aquí es la VELOCIDAD: si el
-    grupo trae más hits de los que le quedan al jugador, cae en un solo
-    golpe combinado en vez de necesitar varias oleadas espaciadas en el
-    tiempo -- reduciendo su chance de escapar o reforzarse entre ataques.
+    Versión de resolver_llegada_a_jugador para un RALLY: todo el grupo
+    pelea como una sola fuerza combinada contra el mejor escuadrón que
+    el jugador enemigo tenga disponible en base (ver
+    escuadron_defensor_disponible). Si el grupo vence (o no había
+    defensa disponible), aplica tantos hits como escuadrones lo
+    componen -- golpe combinado, puede tumbarlo de una en vez de
+    necesitar varias oleadas espaciadas en el tiempo. Si el defensor
+    gana, repele TODO el rally sin que conecte ningún golpe.
     """
     equipo_atacante = escuadrones_grupo[0].jugador_dueño.equipo
 
@@ -992,23 +1035,63 @@ def resolver_llegada_grupal_jugador(escuadrones_grupo, jugador_destino):
             esc.rellenar_desde_reserva()
         return
 
-    total_hits_grupo = len(escuadrones_grupo)
-
-    for esc in escuadrones_grupo:
-        esc.jugador_dueño.puntos_personales += PUNTOS_POR_HIT
-        esc.jugador_dueño.puntos_por_kills += PUNTOS_POR_HIT
-
-    if total_hits_grupo >= jugador_destino.hits:
-        bono_repartido = PUNTOS_POR_MUERTE / len(escuadrones_grupo)
+    def _aplicar_golpes_combinados():
+        total_hits_grupo = len(escuadrones_grupo)
         for esc in escuadrones_grupo:
-            esc.jugador_dueño.puntos_personales += bono_repartido
-            esc.jugador_dueño.puntos_por_kills += bono_repartido
-        jugador_destino.morir()
-    else:
-        jugador_destino.hits -= total_hits_grupo
+            esc.jugador_dueño.puntos_personales += PUNTOS_POR_HIT
+            esc.jugador_dueño.puntos_por_kills += PUNTOS_POR_HIT
+        if total_hits_grupo >= jugador_destino.hits:
+            bono_repartido = PUNTOS_POR_MUERTE / len(escuadrones_grupo)
+            for esc in escuadrones_grupo:
+                esc.jugador_dueño.puntos_personales += bono_repartido
+                esc.jugador_dueño.puntos_por_kills += bono_repartido
+            jugador_destino.morir()
+        else:
+            jugador_destino.hits -= total_hits_grupo
 
-    for esc in escuadrones_grupo:
-        esc.regresar_a_base()
+    defensor = escuadron_defensor_disponible(jugador_destino, mapa)
+
+    if defensor is None:
+        # Sin defensa disponible -> expuesto, golpe combinado gratis
+        _aplicar_golpes_combinados()
+        for esc in escuadrones_grupo:
+            esc.regresar_a_base()
+        return
+
+    poder_atacante_total = sum(calcular_poder_combate(e, mapa) for e in escuadrones_grupo)
+    poder_defensor = calcular_poder_combate(defensor, mapa)
+    ganador = resolver_combate(poder_atacante_total, poder_defensor)
+    poder_eliminado = min(poder_atacante_total, poder_defensor)
+    puntos_combate_total = poder_eliminado / ESCALA_PUNTOS_KILL
+
+    if ganador == "A":
+        # El grupo vence a la defensa: el golpe combinado conecta Y cae el defensor
+        parte_ganador = puntos_combate_total / len(escuadrones_grupo)
+        for esc in escuadrones_grupo:
+            esc.jugador_dueño.puntos_personales += parte_ganador
+            esc.jugador_dueño.puntos_por_kills += parte_ganador
+            esc.soldados_actuales = round(esc.soldados_actuales * FRACCION_SOLDADOS_SOBREVIVIENTES)
+
+        defensor.jugador_dueño.puntos_personales += puntos_combate_total * FRACCION_PUNTOS_PERDEDOR
+        defensor.jugador_dueño.puntos_por_kills += puntos_combate_total * FRACCION_PUNTOS_PERDEDOR
+        defensor.soldados_actuales = 0
+        defensor.regresar_a_base()
+
+        _aplicar_golpes_combinados()
+        for esc in escuadrones_grupo:
+            esc.regresar_a_base()
+    else:
+        # La defensa repele TODO el rally: ningún golpe conecta
+        defensor.jugador_dueño.puntos_personales += puntos_combate_total
+        defensor.jugador_dueño.puntos_por_kills += puntos_combate_total
+        defensor.soldados_actuales = round(defensor.soldados_actuales * FRACCION_SOLDADOS_SOBREVIVIENTES)
+
+        parte_perdedor = (puntos_combate_total * FRACCION_PUNTOS_PERDEDOR) / len(escuadrones_grupo)
+        for esc in escuadrones_grupo:
+            esc.jugador_dueño.puntos_personales += parte_perdedor
+            esc.jugador_dueño.puntos_por_kills += parte_perdedor
+            esc.soldados_actuales = 0
+            esc.regresar_a_base()
 
 
 def sumar_puntos_personales(mapa_activo, todos_los_jugadores):
@@ -1082,14 +1165,14 @@ def procesar_llegadas(todos_los_jugadores, mapa, minuto_actual=None):
             resolver_llegada_a_edificio(escuadron, escuadron.destino,
                                          todos_los_jugadores, mapa, minuto_actual)
         elif isinstance(escuadron.destino, Jugador):
-            resolver_llegada_a_jugador(escuadron, escuadron.destino)
+            resolver_llegada_a_jugador(escuadron, escuadron.destino, mapa)
 
     for rally_obj, grupo in por_rally.items():
         objetivo = grupo[0].destino
         if isinstance(objetivo, Edificio):
             resolver_llegada_grupal_edificio(grupo, objetivo, todos_los_jugadores, mapa, minuto_actual)
         elif isinstance(objetivo, Jugador):
-            resolver_llegada_grupal_jugador(grupo, objetivo)
+            resolver_llegada_grupal_jugador(grupo, objetivo, mapa)
 
 
 # ============================================================
@@ -1437,20 +1520,44 @@ def puntaje_edificio_enemigo(escuadron, jugador, edificio, mapa, todos_los_jugad
     return score
 
 
-def poder_maximo_disponible(jugador_enemigo, mapa):
+def escuadron_defensor_disponible(jugador_enemigo, mapa):
     """
-    Retorna el poder de combate (ya con buffs/debuffs aplicados) del
-    escuadrón más fuerte que tiene el jugador enemigo disponible AHORA
-    MISMO en su base (listo para defenderse). Si no tiene ninguno en
-    base, retorna 0 (está totalmente expuesto).
+    Retorna el escuadrón más fuerte que el jugador enemigo tiene
+    disponible AHORA MISMO en su base (listo para defenderlo si lo
+    atacan directamente), o None si no tiene ninguno -- en ese caso
+    queda totalmente expuesto y el golpe es gratis, igual que un
+    edificio sin defensores.
+
+    Es el mismo escuadrón que de verdad pelea en
+    resolver_llegada_a_jugador()/resolver_llegada_grupal_jugador()
+    cuando lo alcanza un ataque directo (confirmado que en el juego
+    real SÍ hay combate real, no un golpe garantizado). Antes de esto,
+    la "defensa disponible" solo se usaba para puntuar la decisión de
+    atacar (puntaje_jugador_enemigo) pero el combate real nunca la
+    consultaba -- un genoma podía evitar "por las puras" a alguien
+    bien defendido sin que esa defensa tuviera ningún efecto real.
     """
+    mejor = None
     mejor_poder = 0
     for esc in jugador_enemigo.escuadrones():
         if esc.estado == "en_base":
             poder = calcular_poder_combate(esc, mapa)
             if poder > mejor_poder:
                 mejor_poder = poder
-    return mejor_poder
+                mejor = esc
+    return mejor
+
+
+def poder_maximo_disponible(jugador_enemigo, mapa):
+    """
+    Retorna el poder de combate (ya con buffs/debuffs aplicados) del
+    escuadrón más fuerte que tiene el jugador enemigo disponible AHORA
+    MISMO en su base (listo para defenderse). Si no tiene ninguno en
+    base, retorna 0 (está totalmente expuesto). Envoltorio de
+    escuadron_defensor_disponible() para quien solo necesita el número.
+    """
+    defensor = escuadron_defensor_disponible(jugador_enemigo, mapa)
+    return calcular_poder_combate(defensor, mapa) if defensor is not None else 0
 
 
 def puntaje_jugador_enemigo(escuadron, jugador, enemigo, mapa, todos_los_jugadores):
