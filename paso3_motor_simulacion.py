@@ -2864,7 +2864,7 @@ if __name__ == "__main__":
     TAMANO_POBLACION = 150
     JUGADORES_POR_EQUIPO = 11
     MAX_GENERACIONES = 250
-    PACIENCIA = 40            # generaciones sin mejora del promedio antes de parar
+    PACIENCIA = 25            # generaciones sin mejora del promedio antes de parar
     PARTIDAS_POR_GENOMA = 10  # más partidas = menos ruido, más lento
 
     # Sembrar la población inicial con los campeones del salón de la fama
