@@ -585,6 +585,10 @@ COOLDOWN_TELETRANSPORTE = 120     # segundos de espera entre teletransportes de 
 UMBRAL_TELETRANSPORTE = 1         # distancia mínima al objetivo para que valga la pena saltar
 SEPARACION_MINIMA = 10            # nadie puede pararse a menos de esto de otro jugador/edificio
 MAX_ESCUADRONES_POR_EDIFICIO = 6  # límite de defensores Y de ataque conjunto por edificio/jugador
+MAX_ESCUADRONES_POR_CAMPAMENTO = 20  # los campamentos tienen su propio límite, mucho más alto
+                                      # (confirmado por el usuario) -- en la práctica casi sin
+                                      # límite dado el tamaño de equipo típico (3 escuadrones x
+                                      # jugadores_por_equipo)
 
 # --- Rally (ataque conjunto sincronizado) ---
 DURACION_RALLY_SEGUNDOS = 60      # ventana para sumarse antes de que el grupo salga junto
@@ -917,9 +921,9 @@ class Jugador:
         self.destino = None
         self.cooldown_teletransporte_restante = 0
 
-        # Genoma: [w1, w2, w3, w4, w5] -- si no se pasa uno ya evolucionado,
+        # Genoma: [w1, w2, w3, w4, w5, w6] -- si no se pasa uno ya evolucionado,
         # arranca con valores aleatorios (generación 0)
-        self.genoma = genoma if genoma is not None else [random.uniform(-1, 1) for _ in range(5)]
+        self.genoma = genoma if genoma is not None else [random.uniform(-1, 1) for _ in range(6)]
 
         total_soldados = random.randint(18462, 26000)
         self.total_soldados_reserva = total_soldados  # baja cuando muere gente
@@ -1496,18 +1500,18 @@ def decidir_accion_genoma(jugador, mapa, todos_los_jugadores, rallies, tick_actu
         for edificio in mapa:
             if edificio.dueño is None:
                 asignados = contar_escuadrones_asignados(edificio, jugador.equipo, todos_los_jugadores)
-                if asignados >= MAX_ESCUADRONES_POR_EDIFICIO:
+                if asignados >= limite_escuadrones_para(edificio):
                     continue
                 if jugador_ya_asignado_a(edificio, jugador):
                     continue  # un escuadrón por jugador por edificio (salvo camps)
-                score = puntaje_edificio(escuadron, jugador, edificio, todos_los_jugadores)
+                score = puntaje_edificio(escuadron, jugador, edificio, mapa, todos_los_jugadores)
                 if mejor_score is None or score > mejor_score:
                     mejor_score = score
                     mejor_opcion = edificio
                     mejor_tipo = "edificio_libre"
             elif edificio.dueño != jugador.equipo:
                 asignados = contar_escuadrones_asignados(edificio, jugador.equipo, todos_los_jugadores)
-                if asignados >= MAX_ESCUADRONES_POR_EDIFICIO:
+                if asignados >= limite_escuadrones_para(edificio):
                     continue
                 if jugador_ya_asignado_a(edificio, jugador):
                     continue
@@ -1518,7 +1522,7 @@ def decidir_accion_genoma(jugador, mapa, todos_los_jugadores, rallies, tick_actu
                     mejor_tipo = "edificio_enemigo"
             else:  # edificio.dueño == jugador.equipo -- ya es mío, ¿reforzarlo?
                 asignados = contar_escuadrones_asignados(edificio, jugador.equipo, todos_los_jugadores)
-                if asignados >= MAX_ESCUADRONES_POR_EDIFICIO:
+                if asignados >= limite_escuadrones_para(edificio):
                     continue
                 if jugador_ya_asignado_a(edificio, jugador):
                     continue
@@ -1661,13 +1665,13 @@ def decidir_teletransporte(jugador, mapa, todos_los_jugadores):
     for edificio in mapa:
         if edificio.dueño is None:
             asignados = contar_escuadrones_asignados(edificio, jugador.equipo, todos_los_jugadores)
-            if asignados >= MAX_ESCUADRONES_POR_EDIFICIO:
+            if asignados >= limite_escuadrones_para(edificio):
                 continue
-            score = puntaje_edificio(referencia, jugador, edificio, todos_los_jugadores)
+            score = puntaje_edificio(referencia, jugador, edificio, mapa, todos_los_jugadores)
             candidatos.append((score, edificio.x, edificio.y))
         elif edificio.dueño == jugador.equipo:
             asignados = contar_escuadrones_asignados(edificio, jugador.equipo, todos_los_jugadores)
-            if asignados >= MAX_ESCUADRONES_POR_EDIFICIO:
+            if asignados >= limite_escuadrones_para(edificio):
                 continue
             score = puntaje_reforzar_edificio_propio(referencia, jugador, edificio, todos_los_jugadores)
             candidatos.append((score, edificio.x, edificio.y))
@@ -1738,9 +1742,37 @@ def jugador_ya_asignado_a(destino_objetivo, jugador):
     return False
 
 
-def puntaje_edificio(escuadron, jugador, edificio, todos_los_jugadores):
-    """Qué tan atractivo le parece a este genoma ir a este edificio (LIBRE)."""
-    w1, w2, w3, w4 = jugador.genoma[:4]
+def limite_escuadrones_para(destino_objetivo):
+    """
+    Los campamentos tienen su propio límite de escuadrones asignados
+    (MAX_ESCUADRONES_POR_CAMPAMENTO, mucho más alto), distinto del límite
+    normal de edificios/jugadores (MAX_ESCUADRONES_POR_EDIFICIO).
+    """
+    if isinstance(destino_objetivo, Edificio) and "campamento" in destino_objetivo.nombre:
+        return MAX_ESCUADRONES_POR_CAMPAMENTO
+    return MAX_ESCUADRONES_POR_EDIFICIO
+
+
+def contar_edificios_propios(equipo, mapa):
+    """Cuántos edificios (de cualquier tipo) controla actualmente este equipo."""
+    return sum(1 for e in mapa if e.dueño == equipo)
+
+
+def puntaje_edificio(escuadron, jugador, edificio, mapa, todos_los_jugadores):
+    """
+    Qué tan atractivo le parece a este genoma ir a este edificio (LIBRE).
+
+    w6 (cobertura) es independiente de w4 (coordinación): w4 empuja hacia
+    donde YA hay aliados asignados a ESTE edificio puntual; w6 mide algo
+    distinto -- cuántos edificios YA tiene el equipo en total. Sin esto,
+    con w4 alto la evolución encontraba que amontonarse en 2-3 edificios
+    bien reforzados (con w5) era más seguro que repartirse, y dejaba
+    edificios libres sin tocar aunque dieran puntos gratis -- w6 negativo
+    le pone un costo creciente a seguir concentrándose en vez de expandir;
+    w6 positivo hace lo contrario (efecto bola de nieve: cuantos más
+    edificios tengo, más gano capturando otro).
+    """
+    w1, w2, w3, w4, w5, w6 = jugador.genoma
 
     valor_puntos = edificio.tasa_alianza
     try:
@@ -1749,8 +1781,9 @@ def puntaje_edificio(escuadron, jugador, edificio, todos_los_jugadores):
         cercania = 15
 
     aliados_ya_asignados = contar_escuadrones_asignados(edificio, jugador.equipo, todos_los_jugadores)
+    edificios_propios = contar_edificios_propios(jugador.equipo, mapa)
 
-    score = w1 * valor_puntos + w2 * cercania + w4 * aliados_ya_asignados
+    score = w1 * valor_puntos + w2 * cercania + w4 * aliados_ya_asignados + w6 * edificios_propios
     return score
 
 
@@ -1763,7 +1796,7 @@ def puntaje_reforzar_edificio_propio(escuadron, jugador, edificio, todos_los_jug
     edificios libres) -- un genoma puede evolucionar para valorar
     capturar y defender de forma distinta.
     """
-    w1, w2, w3, w4, w5 = jugador.genoma
+    w1, w2, w3, w4, w5 = jugador.genoma[:5]
 
     valor_puntos = edificio.tasa_alianza
     try:
@@ -1883,7 +1916,7 @@ def decidir_accion_agente_tonto(jugador, mapa, todos_los_jugadores, rallies=None
         for edificio in mapa:
             if edificio.dueño is None:
                 ya_asignados = contar_escuadrones_asignados(edificio, jugador.equipo, todos_los_jugadores)
-                if ya_asignados >= MAX_ESCUADRONES_POR_EDIFICIO:
+                if ya_asignados >= limite_escuadrones_para(edificio):
                     continue
                 if jugador_ya_asignado_a(edificio, jugador):
                     continue  # un escuadrón por jugador por edificio (salvo camps)
@@ -2120,7 +2153,7 @@ def simular_partida(cantidad_por_equipo=5, duracion_segundos=DURACION_PARTIDA_SE
 # ============================================================
 
 def generar_genoma_aleatorio():
-    return [random.uniform(-1, 1) for _ in range(5)]
+    return [random.uniform(-1, 1) for _ in range(6)]
 
 
 def crear_poblacion_inicial(tamano, genomas_semilla=None, fraccion_sembrada=0.3):
@@ -2138,12 +2171,13 @@ def crear_poblacion_inicial(tamano, genomas_semilla=None, fraccion_sembrada=0.3)
     Por cada semilla se generan 3 variantes:
       - un clon exacto (preserva la estrategia probada, por si nada la
         mejora en esta corrida),
-      - un clon con mutación amplia en los 5 genes (explora su
+      - un clon con mutación amplia en los 6 genes (explora su
         vecindario),
-      - un clon que conserva w1-w4 tal cual pero con w5 (refuerzo)
-        redibujado desde cero -- prueba directamente "esta estrategia
-        ya fuerte + refuerzo" en vez de esperar a que la mutación
-        normal, de paso pequeño, lo encuentre por casualidad.
+      - un clon que conserva w1-w5 tal cual pero con w6 (cobertura --
+        capturar edificios nuevos en vez de amontonarse siempre en los
+        que ya tiene) redibujado desde cero -- prueba directamente "esta
+        estrategia ya fuerte + cobertura" en vez de esperar a que la
+        mutación normal, de paso pequeño, lo encuentre por casualidad.
 
     El resto de la población se completa con genomas aleatorios, para
     no perder diversidad genética y no converger prematuro sobre las
@@ -2157,8 +2191,8 @@ def crear_poblacion_inicial(tamano, genomas_semilla=None, fraccion_sembrada=0.3)
                 break
             poblacion.append(list(genoma))
             poblacion.append(cruzar_genomas(genoma, genoma, ruido=RUIDO_MUTACION * 4))
-            variante_w5 = list(genoma[:4]) + [random.uniform(-1, 1)]
-            poblacion.append(variante_w5)
+            variante_w6 = list(genoma[:5]) + [random.uniform(-1, 1)]
+            poblacion.append(variante_w6)
         poblacion = poblacion[:limite_sembrado]
 
     while len(poblacion) < tamano:
@@ -2545,10 +2579,12 @@ def cargar_salon_fama(archivo=ARCHIVO_SALON_FAMA):
     with open(archivo) as f:
         historial = json.load(f)
     # Compatibilidad: genomas guardados antes de agregar w5 (refuerzo de
-    # edificios propios) solo tienen 4 genes -- se completan con 0.0
-    # (neutral: nunca refuerza) para que sigan siendo jugables.
+    # edificios propios) o w6 (cobertura -- capturar edificios nuevos en
+    # vez de amontonarse en los que ya tiene) pueden tener menos de 6
+    # genes -- se completan con 0.0 (neutral) para que sigan siendo
+    # jugables.
     for entrada in historial:
-        while len(entrada["genoma"]) < 5:
+        while len(entrada["genoma"]) < 6:
             entrada["genoma"].append(0.0)
     return historial
 
@@ -2794,14 +2830,26 @@ if __name__ == "__main__":
     #         evitar duplicar esfuerzo en el mismo objetivo.
     #   w5 -- qué tanto valora REFORZAR un edificio que su equipo ya
     #         controla, mandando un escuadrón adicional como defensor
-    #         (hasta 6 por edificio). Es independiente de w1: un genoma
-    #         puede valorar capturar territorio nuevo distinto de
-    #         defender el que ya tiene. Positivo = blinda sus edificios
-    #         valiosos; 0 o negativo = nunca vuelve a un edificio propio
-    #         una vez capturado (comportamiento anterior a este cambio).
+    #         (hasta 6 por edificio, o 20 en campamentos). Es
+    #         independiente de w1: un genoma puede valorar capturar
+    #         territorio nuevo distinto de defender el que ya tiene.
+    #         Positivo = blinda sus edificios valiosos; 0 o negativo =
+    #         nunca vuelve a un edificio propio una vez capturado.
+    #   w6 -- cobertura: qué tanto le importa CUÁNTOS edificios tiene el
+    #         equipo en total al decidir si vale la pena ir a capturar
+    #         uno libre más. Es distinto de w4 (que mide aliados en ESE
+    #         edificio puntual) -- w6 mide el imperio completo. Negativo
+    #         = cada edificio adicional cuesta más "ganas" de seguir
+    #         expandiéndose (favorece repartirse mientras haya edificios
+    #         libres); positivo = efecto bola de nieve, mientras más
+    #         tiene el equipo más le atrae seguir capturando; 0 = no le
+    #         importa (comportamiento anterior a este cambio, donde solo
+    #         cercanía + coordinación decidían y la evolución tendía a
+    #         amontonarse en pocos edificios bien reforzados en vez de
+    #         cubrir todos los libres).
     # ==========================================================
     MI_GENOMA = None
-    # Ejemplo: MI_GENOMA = [0.5, 0.4, -0.6, 0.1, 0.3]
+    # Ejemplo: MI_GENOMA = [0.5, 0.4, -0.6, 0.1, 0.3, -0.2]
 
     # ==========================================================
     # CONFIGURACIÓN DE LA CORRIDA -- cambia estos valores a lo que

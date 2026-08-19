@@ -69,11 +69,20 @@ mundo con las reglas correctas y se deja que descubra qué funciona.
 | Altar Maldito | 10 | 30 | -15% ATK/DEF/HP a los enemigos | 10 |
 | Reliquias de Guerra | 10 | 30 | +15% ATK/DEF/HP a los aliados | 10 |
 | Castillo de Elixir | 80 | 30 | Ninguno (el más valioso en puntos puros) | 10 |
-| Campamentos | 5 | 5 | Ninguno (sí se puede mandar +1 escuadrón del mismo jugador) | 13 |
+| Campamentos | 5 | 5 | Ninguno (límite propio de 20 escuadrones, no 6 -- ver abajo) | 13 |
 
 **Importante:** un edificio con varios defensores da su tasa de alianza **una
 sola vez** al equipo (no se multiplica por cantidad de defensores). Los
 puntos *personales* sí los gana cada defensor individualmente, sin dividir.
+
+**Límite de escuadrones por edificio**: la mayoría de los edificios topan
+en `MAX_ESCUADRONES_POR_EDIFICIO = 6` (igual al tamaño máximo de un rally).
+**Los campamentos son la excepción**: tienen su propio límite,
+`MAX_ESCUADRONES_POR_CAMPAMENTO = 20` *(confirmado por el usuario
+2026-08-18)* -- en la práctica casi sin límite dado el tamaño de equipo
+típico. Antes de este ajuste, el motor aplicaba el límite de 6 también a
+campamentos (solo eximía la regla de "un jugador, un escuadrón por
+edificio", no el tope de equipo) -- ver `limite_escuadrones_para()`.
 
 ### 2.3 Jugadores
 - Cada jugador tiene **4 hits** (vidas). Al llegar a 0, revive en el spawn
@@ -172,14 +181,16 @@ VISUALIZACIÓN HTML       <- generar_replay_html(), generar_replay_html_multiple
 __main__                <- flujo completo configurable
 ```
 
-### El genoma: `[w1, w2, w3, w4, w5]`
-Cada jugador tiene 5 pesos que definen su estrategia. El score de cualquier
+### El genoma: `[w1, w2, w3, w4, w5, w6]`
+Cada jugador tiene 6 pesos que definen su estrategia. El score de cualquier
 opción (edificio libre/enemigo, edificio propio a reforzar, o jugador
 enemigo) se calcula como:
 
 ```
-score = w1*valor_puntos + w2*cercania + w3*poder_relativo + w4*aliados_ya_asignados
-score_reforzar_propio = w5*valor_puntos + w2*cercania + w4*defensores_ya_asignados
+score_edificio_libre    = w1*valor_puntos + w2*cercania + w4*aliados_ya_asignados + w6*edificios_propios
+score_edificio_enemigo  = w1*valor_puntos + w2*cercania + w3*poder_relativo + w4*aliados_ya_asignados
+score_reforzar_propio   = w5*valor_puntos + w2*cercania + w4*defensores_ya_asignados
+score_jugador_enemigo   = w2*cercania + w3*poder_relativo + w4*aliados_ya_asignados
 ```
 
 - `w1`: qué tanto valora los puntos que da un edificio **libre** al
@@ -192,15 +203,30 @@ score_reforzar_propio = w5*valor_puntos + w2*cercania + w4*defensores_ya_asignad
   negativo = prefiere repartirse.
 - `w5` *(agregado 2026-08-17)*: qué tanto valora **reforzar** un edificio
   que su equipo YA controla, mandando un escuadrón adicional como
-  defensor (hasta `MAX_ESCUADRONES_POR_EDIFICIO`=6). Es independiente de
-  `w1` a propósito: capturar territorio nuevo y defender el que ya se
-  tiene son decisiones distintas que la evolución puede valorar de forma
-  distinta. Antes de este cambio, el agente nunca volvía a evaluar un
-  edificio propio una vez capturado, así que en la práctica cada
-  edificio quedaba con **un solo defensor para siempre**, sin importar
-  cuánto valiera — un hueco de mecánica, no solo de calibración (ver
+  defensor (hasta `MAX_ESCUADRONES_POR_EDIFICIO`=6, o 20 en
+  campamentos). Es independiente de `w1` a propósito: capturar
+  territorio nuevo y defender el que ya se tiene son decisiones
+  distintas que la evolución puede valorar de forma distinta. Antes de
+  este cambio, el agente nunca volvía a evaluar un edificio propio una
+  vez capturado, así que en la práctica cada edificio quedaba con **un
+  solo defensor para siempre**, sin importar cuánto valiera — un hueco
+  de mecánica, no solo de calibración (ver
   `puntaje_reforzar_edificio_propio()` y la rama nueva en
   `decidir_accion_genoma()`).
+- `w6` *(agregado 2026-08-18, "cobertura")*: qué tanto le importa
+  **cuántos edificios tiene el equipo en total** al decidir si vale la
+  pena ir a capturar uno libre más. Distinto de `w4`, que mide aliados
+  en ESE edificio puntual -- `w6` mide el imperio completo. Se agregó
+  porque con `w4` alto (que domina en los campeones más recientes) la
+  evolución encontraba que amontonarse en 2-3 edificios bien reforzados
+  (con `w5`) era más seguro que repartirse, y dejaba edificios libres
+  sin tocar aunque dieran puntos gratis -- el usuario lo notó viendo el
+  replay ("solo se centran en 7 de 11 edificios"). `w6` negativo le pone
+  un costo creciente a seguir concentrándose (favorece cubrir más
+  edificios mientras haya libres); `w6` positivo hace lo contrario
+  (efecto bola de nieve). Ver `puntaje_edificio()` /
+  `contar_edificios_propios()`. Como con toda mecánica nueva: no se sabe
+  todavía qué signo prefiere la evolución -- hay que correrla y ver.
 
 ---
 
